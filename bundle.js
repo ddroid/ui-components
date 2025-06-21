@@ -67,9 +67,7 @@ async function action_bar(opts, protocol) {
   function fail (data, type) { throw new Error('invalid message', { cause: { data, type } }) }
 
   function inject(data) {
-    style.replaceChildren((() => {
-      return document.createElement('style').textContent = data[0]
-    })())
+    style.innerHTML = data.join('\n')
   }
 
   function iconject(data) {
@@ -180,7 +178,7 @@ function fallback_module() {
   }
 }
 }).call(this)}).call(this,"/src/node_modules/action_bar/action_bar.js")
-},{"STATE":1,"quick_actions":6,"quick_editor":7}],3:[function(require,module,exports){
+},{"STATE":1,"quick_actions":7,"quick_editor":8}],3:[function(require,module,exports){
 (function (__filename){(function (){
 const STATE = require('STATE')
 const statedb = STATE(__filename)
@@ -261,9 +259,7 @@ async function actions(opts, protocol) {
   function fail(data, type) { throw new Error('invalid message', { cause: { data, type } }) }
 
   function inject(data) {
-    style.replaceChildren((() => {
-      return document.createElement('style').textContent = data[0]
-    })())
+    style.innerHTML = data.join('\n')
   }
 
   function iconject(data) {
@@ -493,7 +489,7 @@ function fallback_module() {
 }
 
 }).call(this)}).call(this,"/src/node_modules/actions/actions.js")
-},{"STATE":1,"quick_editor":7}],4:[function(require,module,exports){
+},{"STATE":1,"quick_editor":8}],4:[function(require,module,exports){
 (function (__filename){(function (){
 const STATE = require('STATE')
 const statedb = STATE(__filename)
@@ -608,9 +604,7 @@ async function console_history (opts, protocol) {
   }
 
   function inject (data) {
-    style.replaceChildren((() => {
-      return document.createElement('style').textContent = data[0]
-    })())
+    style.innerHTML = data.join('\n')
   }
 
   function oncommands (data) {
@@ -835,7 +829,458 @@ function fallback_module () {
   }
 }
 }).call(this)}).call(this,"/src/node_modules/console_history/console_history.js")
-},{"STATE":1,"quick_editor":7}],5:[function(require,module,exports){
+},{"STATE":1,"quick_editor":8}],5:[function(require,module,exports){
+(function (__filename){(function (){
+const STATE = require('STATE')
+const statedb = STATE(__filename)
+const { sdb, get } = statedb(fallback_module)
+
+module.exports = graph_explorer
+
+async function graph_explorer (opts, protocol) {
+  const { id, sdb } = await get(opts.sid)
+  const {drive} = sdb
+  const on = {
+    style: inject,
+    graph_data: on_graph_data,
+    icons: iconject
+  }
+
+  const el = document.createElement('div')
+  const shadow = el.attachShadow({ mode: 'closed' })
+  shadow.innerHTML = `
+  <div class="graph-explorer-container">
+    <div class="graph-entries"></div>
+  </div>
+  <style>
+  </style>`
+  
+  const style = shadow.querySelector('style')
+  const graph_entries = shadow.querySelector('.graph-entries')
+
+  let init = false
+  let graph_data = []
+  let icons = {}
+  let expanded_entries = new Set()
+  let super_nodes = new Map()
+  let visible_super_nodes = new Set()
+  
+  const subs = await sdb.watch(onbatch)
+  let send = null
+  let _ = null
+  if (protocol) {
+    send = protocol(msg => onmessage(msg))
+    _ = { up: send }
+  }
+
+  return el
+
+  function create_graph_entry(entry, level = 0, parent_path = '', parent_entry = null) {
+    const entry_el = document.createElement('div')
+    entry_el.className = 'graph-entry'
+    entry_el.style.paddingLeft = `${level * 20}px`
+    
+    const current_path = parent_path ? `${parent_path}/${entry.name}` : entry.name
+    const has_children = entry.children && entry.children.length > 0
+    const is_expanded = expanded_entries.has(current_path)
+    
+    // Store parent relationship
+    if (parent_entry) {
+      super_nodes.set(current_path, parent_entry)
+    }
+    
+    const tree_symbol = get_tree_symbol(entry, level, is_expanded, has_children)
+    const icon = icons[entry.type] || entry.icon || '📁'
+    
+    entry_el.innerHTML = `
+    <span class="tree-symbol" data-path="${current_path}">${tree_symbol}</span>
+    <span class="entry-icon" data-path="${current_path}">${icon}</span>
+    <span class="entry-name">${entry.name}</span>
+    `
+    
+    const tree_symbol_el = entry_el.querySelector('.tree-symbol')
+    const icon_el = entry_el.querySelector('.entry-icon')
+    
+    // Add click event to tree symbol to show super node
+    if (parent_entry && level > 0) {
+      tree_symbol_el.onclick = () => toggle_super_node(current_path, parent_entry)
+      tree_symbol_el.style.cursor = 'pointer'
+      tree_symbol_el.title = `Show parent: ${parent_entry.name}`
+    }
+    
+    // Add click event to icon for expanding children
+    if (has_children) {
+      icon_el.onclick = () => toggle_entry(current_path, entry)
+    }
+    
+    return entry_el
+  }
+
+  function get_tree_symbol(entry, level, is_expanded, has_children) {
+    if (level === 0) {
+      return has_children ? (is_expanded ? '🪄┬' : '🪄─') : '🪄─'
+    }
+    
+    if (has_children) {
+      return is_expanded ? '├┬' : '├─'
+    } else {
+      return '├─'
+    }
+  }
+
+  function toggle_entry(path, entry) {
+    if (expanded_entries.has(path)) {
+      expanded_entries.delete(path)
+    } else {
+      expanded_entries.add(path)
+    }
+    render_graph()
+    
+    if (protocol && _) {
+      _.up({ 
+        type: 'entry_toggled', 
+        data: { path, expanded: expanded_entries.has(path), entry } 
+      })
+    }
+  }
+
+  function toggle_super_node(child_path, parent_entry) {
+    const super_node_key = `super_${child_path}`
+    
+    if (visible_super_nodes.has(super_node_key)) {
+      visible_super_nodes.delete(super_node_key)
+    } else {
+      visible_super_nodes.add(super_node_key)
+    }
+    
+    render_graph()
+    
+    if (protocol && _) {
+      _.up({ 
+        type: 'super_node_toggled', 
+        data: { child_path, parent_entry, visible: visible_super_nodes.has(super_node_key) } 
+      })
+    }
+  }
+
+  function create_super_node_entry(parent_entry, child_path, level) {
+    const super_node_el = document.createElement('div')
+    super_node_el.className = 'graph-entry super-node'
+    super_node_el.style.paddingLeft = `${(level - 1) * 20}px`
+    
+    const parent_icon = icons[parent_entry.type] || parent_entry.icon || '📁'
+    
+    super_node_el.innerHTML = `
+    <span class="tree-symbol">┌─</span>
+    <span class="entry-icon super-node-icon">${parent_icon}</span>
+    <span class="entry-name super-node-name">${parent_entry.name}</span>
+    <span class="super-node-label">(parent)</span>
+    `
+    
+    return super_node_el
+  }
+
+  function render_graph() {
+    graph_entries.innerHTML = ''
+    super_nodes.clear() // Clear previous parent relationships
+    
+    graph_data.forEach(entry => {
+      render_entry_with_super_nodes(entry)
+    })
+  }
+
+  function render_entry_with_super_nodes(entry, level = 0, parent_path = '', parent_entry = null) {
+    const current_path = parent_path ? `${parent_path}/${entry.name}` : entry.name
+    const super_node_key = `super_${current_path}`
+    
+    // Show super node if it's visible
+    if (level > 0 && visible_super_nodes.has(super_node_key) && parent_entry) {
+      const super_node_el = create_super_node_entry(parent_entry, current_path, level)
+      graph_entries.appendChild(super_node_el)
+    }
+    
+    // Create and append the main entry
+    const entry_el = create_graph_entry(entry, level, parent_path, parent_entry)
+    graph_entries.appendChild(entry_el)
+    
+    // Recursively render children if expanded
+    const has_children = entry.children && entry.children.length > 0
+    const is_expanded = expanded_entries.has(current_path)
+    
+    if (is_expanded && has_children) {
+      entry.children.forEach(child => {
+        render_entry_with_super_nodes(child, level + 1, current_path, entry)
+      })
+    }
+  }
+
+  function onmessage ({ type, data }) {
+    if (type === 'expand_entry') {
+      expanded_entries.add(data.path)
+      render_graph()
+    } else if (type === 'collapse_entry') {
+      expanded_entries.delete(data.path)
+      render_graph()
+    } else if (type === 'show_super_node') {
+      visible_super_nodes.add(`super_${data.path}`)
+      render_graph()
+    } else if (type === 'hide_super_node') {
+      visible_super_nodes.delete(`super_${data.path}`)
+      render_graph()
+    }
+  }
+
+  async function onbatch(batch) {
+    for (const { type, paths } of batch){
+      const data = await Promise.all(paths.map(path => drive.get(path).then(file => file.raw)))
+      const func = on[type] || fail
+      func(data, type)
+    }
+    if (!init && graph_data.length > 0) {
+      render_graph()
+      init = true
+    }
+  }
+
+  function fail(data, type) { 
+    throw new Error('invalid message', { cause: { data, type } }) 
+  }
+
+  function inject(data) {
+    style.innerHTML = data.join('\n')
+  }
+
+  function on_graph_data(data) {
+    graph_data = JSON.parse(data[0])
+  }
+
+  function iconject(data) {
+    icons = {
+      root: data[0] || '🌐',
+      folder: data[1] || '📁',
+      code: data[2] || '📚',
+      data: data[3] || '📁',
+      tasks: data[4] || '🗄️'
+    }
+  }
+}
+
+function fallback_module () {
+  return {
+    api: fallback_instance
+  }
+
+  function fallback_instance () {
+    return {
+      drive: {
+        'style/': {
+          'theme.css': {
+            raw: `
+              .graph-explorer-container {
+                background-color: #0d1117;
+                color: #c9d1d9;
+                font-family: 'Courier New', monospace;
+                font-size: 14px;
+                line-height: 1.4;
+                padding: 12px;
+                border-radius: 6px;
+                border: 1px solid #21262d;
+                min-height: 200px;
+                max-height: 400px;
+                overflow-y: auto;
+              }
+              .graph-entries {
+                display: flex;
+                flex-direction: column;
+                gap: 2px;
+              }
+              .graph-entry {
+                display: flex;
+                align-items: center;
+                gap: 4px;
+                padding: 2px 0;
+                white-space: nowrap;
+                user-select: none;
+              }
+              .tree-symbol {
+                color: #7c3aed;
+                font-weight: bold;
+                min-width: 24px;
+              }
+              .entry-icon {
+                cursor: pointer;
+                font-size: 16px;
+                transition: transform 0.1s ease;
+                min-width: 20px;
+              }
+              .entry-icon:hover {
+                transform: scale(1.1);
+              }
+              .entry-name {
+                color: #f0f6fc;
+                font-weight: 500;
+              }
+              .super-node {
+                background-color: #1c2128;
+                border-left: 2px solid #7c3aed;
+                margin: 1px 0;
+                border-radius: 3px;
+                padding: 2px 4px;
+              }
+              .super-node .tree-symbol {
+                color: #fbbf24;
+              }
+              .super-node-icon {
+                opacity: 0.8;
+                cursor: default !important;
+              }
+              .super-node-name {
+                color: #fbbf24;
+                font-weight: 600;
+              }
+              .super-node-label {
+                color: #6b7280;
+                font-size: 12px;
+                font-style: italic;
+                margin-left: 8px;
+              }
+              .graph-explorer-container::-webkit-scrollbar {
+                width: 6px;
+              }
+              .graph-explorer-container::-webkit-scrollbar-track {
+                background: #161b22;
+                border-radius: 3px;
+              }
+              .graph-explorer-container::-webkit-scrollbar-thumb {
+                background: #30363d;
+                border-radius: 3px;
+              }
+              .graph-explorer-container::-webkit-scrollbar-thumb:hover {
+                background: #484f58;
+              }
+            `
+          }
+        },
+        'graph_data/': {
+          'structure.json': {
+            raw: JSON.stringify([
+              {
+                name: '/',
+                type: 'root',
+                icon: '🌐',
+                children: [
+                  {
+                    name: 'pins/',
+                    type: 'folder',
+                    icon: '📁',
+                    children: []
+                  },
+                  {
+                    name: 'code/',
+                    type: 'code',
+                    icon: '📚',
+                    children: [
+                      {
+                        name: 'playproject_website',
+                        type: 'folder',
+                        icon: '📖',
+                        children: [
+                          {
+                            name: 'index.html',
+                            type: 'file',
+                            icon: '📄',
+                            children: []
+                          },
+                          {
+                            name: 'main.js',
+                            type: 'file',
+                            icon: '📄',
+                            children: []
+                          }
+                        ]
+                      },
+                      {
+                        name: 'theme_widget',
+                        type: 'folder',
+                        icon: '📖',
+                        children: [
+                          {
+                            name: 'widget.html',
+                            type: 'file',
+                            icon: '📄',
+                            children: []
+                          },
+                          {
+                            name: 'widget.js',
+                            type: 'file',
+                            icon: '📄',
+                            children: []
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    name: 'data/',
+                    type: 'data',
+                    icon: '📁',
+                    children: [
+                      {
+                        name: 'themes/',
+                        type: 'folder',
+                        icon: '📁',
+                        children: [
+                          {
+                            name: 'fantasy.json',
+                            type: 'file',
+                            icon: '🎨',
+                            children: []
+                          },
+                          {
+                            name: 'night.json',
+                            type: 'file',
+                            icon: '🎨',
+                            children: []
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    name: 'tasks/',
+                    type: 'tasks',
+                    icon: '🗄️',
+                    children: []
+                  }
+                ]
+              }
+            ])
+          }
+        },
+        'icons/': {
+          'root.txt': {
+            raw: '🌐'
+          },
+          'folder.txt': {
+            raw: '📁'
+          },
+          'code.txt': {
+            raw: '📚'
+          },
+          'data.txt': {
+            raw: '📁'
+          },
+          'tasks.txt': {
+            raw: '🗄️'
+          }
+        }
+      }
+    }
+  }
+}
+
+}).call(this)}).call(this,"/src/node_modules/graph_explorer.js")
+},{"STATE":1}],6:[function(require,module,exports){
 (function (__filename){(function (){
 const STATE = require('STATE')
 const statedb = STATE(__filename)
@@ -946,9 +1391,7 @@ async function create_component_menu (opts, names, inicheck, callbacks) {
   function fail(data, type) { throw new Error('invalid message', { cause: { data, type } }) }
 
   function inject (data) {
-    style.replaceChildren((() => {
-      return document.createElement('style').textContent = data[0]
-    })())
+    style.innerHTML = data.join('\n')
   }
 }
 function fallback_module () {
@@ -1097,7 +1540,7 @@ function fallback_module () {
 }
 
 }).call(this)}).call(this,"/src/node_modules/menu.js")
-},{"STATE":1,"quick_editor":7}],6:[function(require,module,exports){
+},{"STATE":1,"quick_editor":8}],7:[function(require,module,exports){
 (function (__filename){(function (){
 const STATE = require('STATE')
 const statedb = STATE(__filename)
@@ -1248,9 +1691,7 @@ async function quick_actions(opts, protocol) {
   function fail (data, type) { throw new Error('invalid message', { cause: { data, type } }) }
 
   function inject(data) {
-    style.replaceChildren((() => {
-      return document.createElement('style').textContent = data[0]
-    })())
+    style.innerHTML = data.join('\n')
   }
   function onhardcons(data) {
     hardcons = {
@@ -1483,7 +1924,7 @@ function fallback_module() {
   }
 }
 }).call(this)}).call(this,"/src/node_modules/quick_actions/quick_actions.js")
-},{"STATE":1,"quick_editor":7}],7:[function(require,module,exports){
+},{"STATE":1,"quick_editor":8}],8:[function(require,module,exports){
 module.exports = editor
 let count = 0
 let first = true
@@ -1636,7 +2077,7 @@ function init ({ style, inject, drive, text }, el) {
     }
   }
 }
-},{}],8:[function(require,module,exports){
+},{}],9:[function(require,module,exports){
 (function (__filename){(function (){
 const STATE = require('STATE')
 const statedb = STATE(__filename)
@@ -1645,6 +2086,7 @@ const { sdb, get } = statedb(fallback_module)
 const console_history = require('console_history')
 const actions = require('actions')
 const tabbed_editor = require('tabbed_editor')
+const graph_explorer = require('graph_explorer')
 const editor = require('quick_editor')
 
 module.exports = component
@@ -1660,6 +2102,7 @@ async function component (opts, protocol) {
   const shadow = el.attachShadow({ mode: 'closed' })
   shadow.innerHTML = `
   <div class="space main">
+    <graph-explorer-placeholder></graph-explorer-placeholder>
     <actions-placeholder></actions-placeholder>
     <tabbed-editor-placeholder></tabbed-editor-placeholder>
     <console-history-placeholder></console-history-placeholder>
@@ -1668,6 +2111,7 @@ async function component (opts, protocol) {
   </style>`
   const style = shadow.querySelector('style')
   const main = shadow.querySelector('.main')
+  const graph_explorer_placeholder = shadow.querySelector('graph-explorer-placeholder')
   const actions_placeholder = shadow.querySelector('actions-placeholder')
   const tabbed_editor_placeholder = shadow.querySelector('tabbed-editor-placeholder')
   const console_placeholder = shadow.querySelector('console-history-placeholder')
@@ -1677,14 +2121,19 @@ async function component (opts, protocol) {
   let console_history_el = null
   let actions_el = null
   let tabbed_editor_el = null
+  let graph_explorer_el = null
 
   const subs = await sdb.watch(onbatch)
   let send = null
   let _ = null
   if(protocol) {
     send = protocol(msg => onmessage(msg))
-    _ = { up: send, actions: null, send_console_history: null, send_tabbed_editor: null }
+    _ = { up: send, actions: null, send_console_history: null, send_tabbed_editor: null, send_graph_explorer: null }
   }
+  
+  graph_explorer_el = protocol ? await graph_explorer(subs[3], graph_explorer_protocol) : await graph_explorer(subs[3])
+  graph_explorer_el.classList.add('graph-explorer')
+  graph_explorer_placeholder.replaceWith(graph_explorer_el)
   
   actions_el = protocol ? await actions(subs[1], actions_protocol) : await actions(subs[1])
   actions_el.classList.add('actions')
@@ -1700,11 +2149,13 @@ async function component (opts, protocol) {
   let console_view = false
   let actions_view = false
   let tabbed_editor_view = true
+  let graph_explorer_view = false
 
   if (protocol) {
     console_history_el.classList.add('hide')
     actions_el.classList.add('hide')
     tabbed_editor_el.classList.add('show')
+    graph_explorer_el.classList.add('hide')
   }
 
   return el
@@ -1731,6 +2182,17 @@ async function component (opts, protocol) {
     actions_view = !actions_view
   }
 
+  function graph_explorer_toggle_view() {
+    if(graph_explorer_view) {
+      graph_explorer_el.classList.remove('show')
+      graph_explorer_el.classList.add('hide')
+    } else {
+      graph_explorer_el.classList.remove('hide')
+      graph_explorer_el.classList.add('show')
+    }
+    graph_explorer_view = !graph_explorer_view
+  }
+
   function tabbed_editor_toggle_view(show = true) {
     if (show) {
       tabbed_editor_el.classList.remove('hide')
@@ -1739,9 +2201,12 @@ async function component (opts, protocol) {
       actions_el.classList.add('hide')
       console_history_el.classList.remove('show')
       console_history_el.classList.add('hide')
+      graph_explorer_el.classList.remove('show')
+      graph_explorer_el.classList.add('hide')
       tabbed_editor_view = true
       actions_view = false
       console_view = false
+      graph_explorer_view = false
     } else {
       tabbed_editor_el.classList.remove('show')
       tabbed_editor_el.classList.add('hide')
@@ -1791,8 +2256,17 @@ async function component (opts, protocol) {
     }
   }
   
+  function graph_explorer_protocol (send) {
+    _.send_graph_explorer = send
+    return on
+    function on ({ type, data }) { 
+      _.up({ type, data })
+    }
+  }
+  
   function onmessage ({ type, data }) {
     if(type == 'console_history_toggle') console_history_toggle_view()
+    else if (type == 'graph_explorer_toggle') graph_explorer_toggle_view()
     else if (type == 'display_actions') actions_toggle_view(data)
     else if (type == 'filter_actions') _.send_actions({ type, data })
     else if (type == 'tab_name_clicked') {
@@ -1812,6 +2286,11 @@ async function component (opts, protocol) {
         _.send_tabbed_editor({ type, data })
       }
     }
+    else if (type == 'entry_toggled') {
+      if (_.send_graph_explorer) {
+        _.send_graph_explorer({ type, data })
+      }
+    }
   }
 }
 
@@ -1826,6 +2305,9 @@ function fallback_module () {
         $: ''
       },
       'tabbed_editor': {
+        $: ''
+      },
+      'graph_explorer': {
         $: ''
       },
       'quick_editor': 0
@@ -1860,6 +2342,14 @@ function fallback_module () {
             'files': 'files',
             'highlight': 'highlight',
             'active_tab': 'active_tab'
+          }
+        },
+        'graph_explorer': {
+          0: '',
+          mapping: {
+            'style': 'style',
+            'graph_data': 'graph_data',
+            'icons': 'icons'
           }
         }
       },
@@ -1921,7 +2411,165 @@ function fallback_module () {
 }
 
 }).call(this)}).call(this,"/src/node_modules/space.js")
-},{"STATE":1,"actions":3,"console_history":4,"quick_editor":7,"tabbed_editor":9}],9:[function(require,module,exports){
+},{"STATE":1,"actions":3,"console_history":4,"graph_explorer":5,"quick_editor":8,"tabbed_editor":11}],10:[function(require,module,exports){
+(function (__filename){(function (){
+const STATE = require('STATE')
+const statedb = STATE(__filename)
+const { sdb, get } = statedb(fallback_module)
+
+const actions = require('actions')
+const editor = require('quick_editor')
+
+
+module.exports = steps_wizard
+
+async function steps_wizard (opts) {
+  const { id, sdb } = await get(opts.sid)
+  const {drive} = sdb
+
+  const on = {
+    style: inject,
+    variables: onvariables,
+  }
+
+  let variables = []
+
+  const el = document.createElement('div')
+  const shadow = el.attachShadow({ mode: 'closed' })
+  shadow.innerHTML = `
+  <div class="steps-wizard main">
+    <div class="actions-slot"></div>
+    <div class="steps-slot"></div>
+  </div>
+  <style>
+  </style>
+  `
+
+  const style = shadow.querySelector('style')
+  const main = shadow.querySelector('.main')
+  const actions_slot = shadow.querySelector('.actions-slot')
+  const steps_entries = shadow.querySelector('.steps-slot')
+
+
+  main.append(editor(style, inject = inject))
+
+  const subs = await sdb.watch(onbatch)
+
+  let actions_el = null
+
+  actions_el = await actions(subs[0])
+  actions_slot.replaceWith(actions_el)
+  
+  return el
+  
+  function render_steps(steps) {
+    steps_entries.innerHTML = '';
+
+    steps.forEach((step, index) => {
+      const btn = document.createElement('button');
+      btn.className = 'step-button';
+      btn.textContent = step.name + (step.type === 'optional' ? ' *' : '');
+      btn.setAttribute('data-step', index + 1);
+
+      const accessible = can_access(index, steps);
+
+      let status = 'default';
+      if (!accessible) status = 'disabled';
+      else if (step.is_completed) status = 'completed';
+      else if (step.status === 'error') status = 'error';
+      else if (step.type === 'optional') status = 'optional';
+
+      btn.classList.add(`step-${status}`);
+      btn.disabled = (status === 'disabled');
+
+      btn.onclick = () => {
+        if (!btn.disabled) {
+          step.is_completed = true
+          step.status = 'completed';
+          console.log('Clicked:', step);
+          render_steps(steps);
+        }
+      };
+
+      steps_entries.appendChild(btn);
+    });
+    
+  }
+
+  function can_access(index, steps) {
+    for (let i = 0; i < index; i++) {
+      if (!steps[i].is_completed && steps[i].type !== 'optional') {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  async function onbatch(batch) {
+    for (const { type, paths } of batch){
+      const data = await Promise.all(paths.map(path => drive.get(path).then(file => file.raw)))
+      const func = on[type] || fail
+      func(data, type)
+    }
+  }
+  function fail(data, type) { throw new Error('invalid message', { cause: { data, type } }) }
+  function inject (data) {
+    style.replaceChildren((() => {
+      return document.createElement('style').textContent = data[0]
+    })())
+  }
+
+  function onvariables (data) {
+    const vars = typeof data[0] === 'string' ? JSON.parse(data[0]) : data[0]
+    variables = vars['change_path']
+    render_steps(variables); 
+  }
+
+}
+
+function fallback_module () {
+  return {
+    api: fallback_instance,
+    _: {
+      'actions': {
+        $: ''
+      },
+      'quick_editor': 0
+    }
+  }
+
+  function fallback_instance () {
+    return {
+      _: {
+        'actions': {
+          0: '',
+          mapping: {
+            'style': 'style',
+            'actions': 'actions',
+            'icons': 'icons',
+            'hardcons': 'hardcons'
+          }
+        }
+      },
+      drive: {
+        'style/': {
+          'stepswizard.css': {
+            '$ref': 'stepswizard.css' 
+          }
+        },
+        'variables/': {
+          'steps_wizard.json': {
+            '$ref': 'steps_wizard.json'
+          }
+        },
+      }
+    }
+  }
+}
+
+}).call(this)}).call(this,"/src/node_modules/steps_wizard/steps_wizard.js")
+},{"STATE":1,"actions":3,"quick_editor":8}],11:[function(require,module,exports){
 (function (__filename){(function (){
 const STATE = require('STATE')
 const statedb = STATE(__filename)
@@ -2101,9 +2749,7 @@ async function tabbed_editor(opts, protocol) {
   }
 
   function inject(data) {
-    style.replaceChildren((() => {
-      return document.createElement('style').textContent = data[0]
-    })())
+    style.innerHTML = data.join('\n')
   }
 
   function onfiles(data) {
@@ -2322,7 +2968,7 @@ function fallback_module() {
 }
 
 }).call(this)}).call(this,"/src/node_modules/tabbed_editor/tabbed_editor.js")
-},{"STATE":1,"quick_editor":7}],10:[function(require,module,exports){
+},{"STATE":1,"quick_editor":8}],12:[function(require,module,exports){
 (function (__filename){(function (){
 const STATE = require('STATE')
 const statedb = STATE(__filename)
@@ -2469,9 +3115,7 @@ async function component (opts, protocol) {
   }
   function fail (data, type) { throw new Error('invalid message', { cause: { data, type } }) }
   function inject (data) {
-    style.replaceChildren((() => {
-      return document.createElement('style').textContent = data[0]
-    })())
+    style.innerHTML = data.join('\n')
   }
 
   function onvariables (data) {
@@ -2541,7 +3185,7 @@ function fallback_module () {
 }
 
 }).call(this)}).call(this,"/src/node_modules/tabs/tabs.js")
-},{"STATE":1,"quick_editor":7}],11:[function(require,module,exports){
+},{"STATE":1,"quick_editor":8}],13:[function(require,module,exports){
 (function (__filename){(function (){
 const state = require('STATE')
 const state_db = state(__filename)
@@ -2637,9 +3281,7 @@ async function tabsbar (opts, protocol) {
   function fail (data, type) { throw new Error('invalid message', { cause: { data, type } }) }
 
   function inject (data) {
-    style.replaceChildren((() => {
-      return document.createElement('style').textContent = data[0]
-    })())
+    style.innerHTML = data.join('\n')
   }
 
   function inject_icons (data) {
@@ -2729,7 +3371,7 @@ function fallback_module () {
   }
 }
 }).call(this)}).call(this,"/src/node_modules/tabsbar/tabsbar.js")
-},{"STATE":1,"quick_editor":7,"tabs":10,"task_manager":12}],12:[function(require,module,exports){
+},{"STATE":1,"quick_editor":8,"tabs":12,"task_manager":14}],14:[function(require,module,exports){
 (function (__filename){(function (){
 const STATE = require('STATE')
 const statedb = STATE(__filename)
@@ -2776,9 +3418,7 @@ async function task_manager (opts, callback = () => console.log('task manager cl
   }
   function fail (data, type) { throw new Error('invalid message', { cause: { data, type } }) }
   function inject (data) {
-    style.replaceChildren((() => {
-      return document.createElement('style').textContent = data[0]
-    })())
+    style.innerHTML = data.join('\n')
   }
 
   function update_count (data) {
@@ -2829,7 +3469,7 @@ function fallback_module () {
 }
 
 }).call(this)}).call(this,"/src/node_modules/task_manager.js")
-},{"STATE":1,"quick_editor":7}],13:[function(require,module,exports){
+},{"STATE":1,"quick_editor":8}],15:[function(require,module,exports){
 (function (__filename){(function (){
 const STATE = require('STATE')
 const statedb = STATE(__filename)
@@ -2892,9 +3532,7 @@ async function taskbar(opts, protocol) {
   function fail(data, type) { throw new Error('invalid message', { cause: { data, type } }) }
 
   function inject(data) {
-    style.replaceChildren((() => {
-      return document.createElement('style').textContent = data[0]
-    })())
+    style.innerHTML = data.join('\n')
   }
 
   // ---------
@@ -2992,7 +3630,7 @@ function fallback_module() {
 }
 
 }).call(this)}).call(this,"/src/node_modules/taskbar/taskbar.js")
-},{"STATE":1,"action_bar":2,"quick_editor":7,"tabsbar":11}],14:[function(require,module,exports){
+},{"STATE":1,"action_bar":2,"quick_editor":8,"tabsbar":13}],16:[function(require,module,exports){
 (function (__filename){(function (){
 const STATE = require('STATE')
 const statedb = STATE(__filename)
@@ -3131,7 +3769,7 @@ function fallback_module () {
 }
 
 }).call(this)}).call(this,"/src/node_modules/theme_widget/theme_widget.js")
-},{"STATE":1,"quick_editor":7,"space":8,"taskbar":13}],15:[function(require,module,exports){
+},{"STATE":1,"quick_editor":8,"space":9,"taskbar":15}],17:[function(require,module,exports){
 const hash = 'dd5a8a33c1ca1228ed3f4284b3067f36a0d2873e'
 const prefix = 'https://raw.githubusercontent.com/alyhxn/playproject/' + hash + '/'
 const init_url = prefix + 'doc/state/example/init.js'
@@ -3145,7 +3783,7 @@ fetch(init_url, { cache: 'no-store' }).then(res => res.text()).then(async source
   await init(args, prefix)
   require('./page')
 })
-},{"./page":16}],16:[function(require,module,exports){
+},{"./page":18}],18:[function(require,module,exports){
 (function (__filename){(function (){
 localStorage.clear()
 const STATE = require('../src/node_modules/STATE')
@@ -3167,7 +3805,9 @@ const actions = require('../src/node_modules/actions')
 const tabbed_editor = require('../src/node_modules/tabbed_editor')
 const task_manager = require('../src/node_modules/task_manager')
 const quick_actions = require('../src/node_modules/quick_actions')
+const graph_explorer = require('../src/node_modules/graph_explorer')
 const editor = require('../src/node_modules/quick_editor')
+const steps_wizard = require('../src/node_modules/steps_wizard')
 
 const imports = {
   theme_widget,
@@ -3180,7 +3820,9 @@ const imports = {
   actions,
   tabbed_editor,
   task_manager,
-  quick_actions
+  quick_actions,
+  graph_explorer,
+  steps_wizard,
 }
 config().then(() => boot({ sid: '' }))
 
@@ -3389,9 +4031,7 @@ async function create_component (entries_obj) {
   }
   function fail (data, type) { throw new Error('invalid message', { cause: { data, type } }) }
   function inject(data) {
-    style.replaceChildren((() => {
-      return document.createElement('style').textContent = data[0]
-    })())
+    style.innerHTML = data.join('\n')
   }
 }
 function fallback_module () {
@@ -3407,7 +4047,9 @@ function fallback_module () {
     '../src/node_modules/actions',
     '../src/node_modules/tabbed_editor',
     '../src/node_modules/task_manager',
-    '../src/node_modules/quick_actions'
+    '../src/node_modules/quick_actions',
+    '../src/node_modules/graph_explorer',
+    '../src/node_modules/steps_wizard'
   ]
   const subs = {}
   names.forEach(subgen)
@@ -3418,6 +4060,14 @@ function fallback_module () {
       'icons': 'icons',
       'variables': 'variables',
       'scroll': 'scroll',
+      'style': 'style'
+    }
+  }
+  subs['../src/node_modules/steps_wizard'] = {
+    $: '',
+    0: '',
+    mapping: {
+      'variables': 'variables',
       'style': 'style'
     }
   }
@@ -3483,6 +4133,15 @@ function fallback_module () {
       'icons': 'icons',
       'actions': 'actions',
       'hardcons': 'hardcons'
+    }
+  }
+  subs['../src/node_modules/graph_explorer'] = {
+    $: '',
+    0: '',
+    mapping: {
+      'style': 'style',
+      'graph_data': 'graph_data',
+      'icons': 'icons'
     }
   }
   subs[menuname] = { 
@@ -3594,4 +4253,4 @@ function fallback_module () {
 }
 
 }).call(this)}).call(this,"/web/page.js")
-},{"../src/node_modules/STATE":1,"../src/node_modules/action_bar":2,"../src/node_modules/actions":3,"../src/node_modules/console_history":4,"../src/node_modules/menu":5,"../src/node_modules/quick_actions":6,"../src/node_modules/quick_editor":7,"../src/node_modules/space":8,"../src/node_modules/tabbed_editor":9,"../src/node_modules/tabs":10,"../src/node_modules/tabsbar":11,"../src/node_modules/task_manager":12,"../src/node_modules/taskbar":13,"../src/node_modules/theme_widget":14}]},{},[15]);
+},{"../src/node_modules/STATE":1,"../src/node_modules/action_bar":2,"../src/node_modules/actions":3,"../src/node_modules/console_history":4,"../src/node_modules/graph_explorer":5,"../src/node_modules/menu":6,"../src/node_modules/quick_actions":7,"../src/node_modules/quick_editor":8,"../src/node_modules/space":9,"../src/node_modules/steps_wizard":10,"../src/node_modules/tabbed_editor":11,"../src/node_modules/tabs":12,"../src/node_modules/tabsbar":13,"../src/node_modules/task_manager":14,"../src/node_modules/taskbar":15,"../src/node_modules/theme_widget":16}]},{},[17]);
