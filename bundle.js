@@ -2281,44 +2281,80 @@ const STATE = require('STATE')
 const statedb = STATE(__filename)
 const { sdb, get } = statedb(fallback_module)
 
-const actions = require('actions')
-const editor = require('quick_editor')
-
-
 module.exports = steps_wizard
 
 async function steps_wizard (opts) {
   const { id, sdb } = await get(opts.sid)
   const {drive} = sdb
+
   const on = {
-    style: inject
+    style: inject,
+    variables: onvariables,
   }
+
+  let variables = []
 
   const el = document.createElement('div')
   const shadow = el.attachShadow({ mode: 'closed' })
   shadow.innerHTML = `
   <div class="steps-wizard main">
-    <div class="actions-slot"></div>
+    <div class="steps-slot"></div>
   </div>
   <style>
   </style>
   `
 
   const style = shadow.querySelector('style')
-  const main = shadow.querySelector('.main')
-  const actions_slot = shadow.querySelector('.actions-slot')
-
-  main.append(editor(style, inject = inject))
+  const steps_entries = shadow.querySelector('.steps-slot')
 
   const subs = await sdb.watch(onbatch)
 
-  let actions_el = null
-
-  actions_el = await actions(subs[0])
-  actions_slot.replaceWith(actions_el)
-  
   return el
   
+  function render_steps(steps) {
+    steps_entries.innerHTML = '';
+
+    steps.forEach((step, index) => {
+      const btn = document.createElement('button');
+      btn.className = 'step-button';
+      btn.textContent = step.name + (step.type === 'optional' ? ' *' : '');
+      btn.setAttribute('data-step', index + 1);
+
+      const accessible = can_access(index, steps);
+
+      let status = 'default';
+      if (!accessible) status = 'disabled';
+      else if (step.is_completed) status = 'completed';
+      else if (step.status === 'error') status = 'error';
+      else if (step.type === 'optional') status = 'optional';
+
+      btn.classList.add(`step-${status}`);
+      btn.disabled = (status === 'disabled');
+
+      btn.onclick = () => {
+        if (!btn.disabled) {
+          step.is_completed = true
+          step.status = 'completed';
+          console.log('Clicked:', step);
+          render_steps(steps);
+        }
+      };
+
+      steps_entries.appendChild(btn);
+    });
+    
+  }
+
+  function can_access(index, steps) {
+    for (let i = 0; i < index; i++) {
+      if (!steps[i].is_completed && steps[i].type !== 'optional') {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
   async function onbatch(batch) {
     for (const { type, paths } of batch){
       const data = await Promise.all(paths.map(path => drive.get(path).then(file => file.raw)))
@@ -2332,56 +2368,40 @@ async function steps_wizard (opts) {
       return document.createElement('style').textContent = data[0]
     })())
   }
+
+  function onvariables (data) {
+    const vars = typeof data[0] === 'string' ? JSON.parse(data[0]) : data[0]
+    variables = vars['change_path']
+    render_steps(variables); 
+  }
+
 }
 
 function fallback_module () {
   return {
-    api: fallback_instance,
-    _: {
-      'actions': {
-        $: ''
-      },
-      'quick_editor': 0
-    }
+    api: fallback_instance
   }
 
   function fallback_instance () {
     return {
-      _: {
-        'actions': {
-          0: '',
-          mapping: {
-            'style': 'style',
-            'actions': 'actions',
-            'icons': 'icons',
-            'hardcons': 'hardcons'
-          }
-        }
-      },
       drive: {
         'style/': {
           'stepswizard.css': {
-            raw: `
-              .steps-wizard {
-                display: flex;
-                flex-direction: column;
-                width: 100%;
-                height: 100%;
-                background: #131315;
-              }
-              .space{
-                height: inherit;
-                }
-            `
+            '$ref': 'stepswizard.css' 
           }
-        }
+        },
+        'variables/': {
+          'steps_wizard.json': {
+            '$ref': 'steps_wizard.json'
+          }
+        },
       }
     }
   }
 }
 
 }).call(this)}).call(this,"/src/node_modules/steps_wizard/steps_wizard.js")
-},{"STATE":1,"actions":3,"quick_editor":8}],11:[function(require,module,exports){
+},{"STATE":1}],11:[function(require,module,exports){
 (function (__filename){(function (){
 const STATE = require('STATE')
 const statedb = STATE(__filename)
@@ -3879,6 +3899,14 @@ function fallback_module () {
       'icons': 'icons',
       'variables': 'variables',
       'scroll': 'scroll',
+      'style': 'style'
+    }
+  }
+  subs['../src/node_modules/steps_wizard'] = {
+    $: '',
+    0: '',
+    mapping: {
+      'variables': 'variables',
       'style': 'style'
     }
   }

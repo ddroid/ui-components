@@ -309,6 +309,14 @@ function fallback_module () {
       'style': 'style'
     }
   }
+  subs['../src/node_modules/steps_wizard'] = {
+    $: '',
+    0: '',
+    mapping: {
+      'variables': 'variables',
+      'style': 'style'
+    }
+  }
   subs['../src/node_modules/tabsbar'] = {
     $: '',
     0: '',
