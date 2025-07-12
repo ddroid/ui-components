@@ -19,6 +19,7 @@ const task_manager = require('../src/node_modules/task_manager')
 const quick_actions = require('../src/node_modules/quick_actions')
 const graph_explorer = require('../src/node_modules/graph_explorer')
 const editor = require('../src/node_modules/quick_editor')
+const program = require('../src/node_modules/program')
 const steps_wizard = require('../src/node_modules/steps_wizard')
 
 const imports = {
@@ -34,6 +35,7 @@ const imports = {
   task_manager,
   quick_actions,
   graph_explorer,
+  program,
   steps_wizard,
 }
 config().then(() => boot({ sid: '' }))
@@ -295,7 +297,8 @@ function fallback_module () {
     '../src/node_modules/task_manager',
     '../src/node_modules/quick_actions',
     '../src/node_modules/graph_explorer',
-    '../src/node_modules/steps_wizard'
+    '../src/node_modules/program',
+    '../src/node_modules/steps_wizard',
   ]
   const subs = {}
   names.forEach(subgen)
@@ -306,6 +309,21 @@ function fallback_module () {
       'icons': 'icons',
       'variables': 'variables',
       'scroll': 'scroll',
+      'style': 'style'
+    }
+  }
+  subs['../src/node_modules/program'] = {
+    $: '',
+    0: '',
+    mapping: {
+      'variables': 'variables',
+      'style': 'style'
+    }
+  }
+  subs['../src/node_modules/steps_wizard'] = {
+    $: '',
+    0: '',
+    mapping: {
       'style': 'style'
     }
   }
