@@ -15,5 +15,5 @@ async function config () {
 }
 
 async function boot_default_page () {
-  document.body.append(await ui_gallery({ sid: '' }))
+  document.body.append(await ui_gallery())
 }
