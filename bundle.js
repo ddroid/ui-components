@@ -9174,7 +9174,7 @@ function fallback_module () {
                 flex-direction: row;
                 flex-wrap: nowrap;
                 align-items: stretch;
-                width: 300px;
+                min-width: 256px;
               }
               .hat-btn, .bar-btn {
                 display: flex;
