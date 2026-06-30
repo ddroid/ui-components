@@ -37,12 +37,10 @@ button.onclick = docs.wrap(onbutton_click, '# Close Button\nCloses the current v
 
 ### Wrapping individual handlers
 
-Use `docs.wrap(handler, doc_content)` to manually wrap an event handler:
+`docs.wrap(handler, doc_content)` is deprecated; it still works (and warns once per module) but new handlers should use `docs.wrap_isolated()`. It is kept only as a migration stepping stone. For handlers that still need closure functions or mutate component-local DOM/state, prefer the element-attached `__fn` shim under `wrap_isolated` (see below) over `docs.wrap`.
 
 ```js
 button.onmousedown = docs.wrap(onbutton_press, '# Press Button\nStarts press-and-hold behavior.')
-button.onmouseup = docs.wrap(onbutton_release, '# Release Button\nEnds press-and-hold behavior.')
-button.onmouseover = docs.wrap(onbutton_hover, '# Hover Button\nShows button tooltip.')
 ```
 
 If the docs belong to the handler itself, set `handler.docs` or `handler.info` and omit `doc_content`:
@@ -63,12 +61,25 @@ Isolated handlers can use:
 - `sys.drive.get(path)` to read drive files in normal mode; docs mode returns `{ raw: null, path }`
 - `sys.drive.put(path, data)` to write in normal mode; docs mode returns `Promise<false>`
 - `sys.sdb.watch(handler)` in normal mode; docs mode returns `Promise<[]>`
+- `sys.state` - per-handler object for intermediate gesture state; cleared for all handlers when docs mode deactivates
 - `sys.show_action_info(action)` before running an action; docs mode displays `action.info` and returns `true`
 - `sys.trigger_action(action_or_name, options)` to display action `info` in docs mode or perform the configured normal-mode send/run
 
 ### Wrapping isolated handlers
 
-Use `docs.wrap_isolated(handler_string, doc_content)` when the handler must be created from a function string and must not access local closure scope. In docs mode, isolated handlers still run with dummy/safe `sys` behavior, so multi-step gestures can progress until a registered action is triggered.
+Use `docs.wrap_isolated(handler_string, doc_content, options)` when the handler must be created from a function string and must not access local closure scope. `options.run_in_docs_mode` (default `true`) picks the docs-mode behavior:
+
+- `true` (default) — the handler runs in docs mode with a dummy/safe `sys` (sends/writes suppressed). Add a docs-mode guard (`if (sys.is_docs_mode()) return sys.show_doc()`) before any real side effect; safe gesture progression (e.g. a counter display) can happen before the guard. Use `sys.trigger_action()` for action triggers so `action.info` shows in docs mode.
+- `false` — docs mode blocks the event and shows `doc_content` instead. Reserve for the `__fn` shim or handlers that cannot be guarded inline.
+
+If compilation fails, `DOCS` logs an error and returns a no-op handler.
+
+```js
+button.onclick = docs.wrap_isolated(
+  'function (event, sys) { if (sys.is_docs_mode()) return sys.show_doc(); sys._.up("ui_focus", {}, { type: "button", sid: sys.get_meta().sid }) }',
+  '# Inspect Button\nLogs component metadata.'
+)
+```
 
 ```js
 button.onclick = docs.wrap_isolated(
@@ -77,6 +88,30 @@ button.onclick = docs.wrap_isolated(
 )
 ```
 
+Isolated handlers cannot reach closure variables. Pass per-event data through the event target (`el.__action = action_data`, read via `event.currentTarget.__action`) and component functions through element properties. Call `docs.set_sys({ _, sdb, drive })` once per component so isolated handlers have real normal-mode side effects.
+
+For a closure handler not yet restructured, use the `__fn` shim: attach the closure to the element and delegate from a thin string with `run_in_docs_mode: false`:
+
+```js
+button.__fn = local_on_click
+button.onclick = docs.wrap_isolated(
+  'function (event, sys) { event.currentTarget.__fn(event, sys) }',
+  '# Button\nDocs for the shimmed handler.',
+  { run_in_docs_mode: false }
+)
+```
+
+### Browsing docs without gestures
+
+`docs.get_toc()` (admin: `docs.admin.get_toc(sid)`) returns `{ actions, handlers }` so a details UI can list every action `info` and handler doc for a component without clicking:
+
+```js
+const { actions, handlers } = docs.get_toc()
+// handlers: [{ doc, event_type, component }, ...] recorded from wrap/wrap_isolated/hook
+```
+
+The registry dedupes by `(event_type, doc)`, so re-rendering a dynamic list does not add duplicate entries. Call `docs.clear_handler_docs()` (admin: `docs.admin.clear_handler_docs(sid)`) to reset a component's handler docs on teardown or re-init.
+
 ---
 
 ## How the ❔ details window works
@@ -84,10 +119,11 @@ button.onclick = docs.wrap_isolated(
 The details window leverages a global docs mode state:
 
 1. Docs mode is activated globally (e.g. by toggling the `docs_toggle` action).
-2. When the user clicks an element with a hooked or `docs.wrap()` handler, `DOCS` prevents the default action, stops propagation, and triggers the doc display handler.
-3. `docs.wrap_isolated()` handlers still run in docs mode with dummy/safe `sys` behavior.
+2. For a handler wrapped with `run_in_docs_mode: false` (or the `__fn` shim, or the deprecated `docs.wrap()`), `DOCS` prevents the default action, stops propagation, and triggers the doc display handler.
+3. `docs.wrap_isolated()` handlers with `run_in_docs_mode: true` (the default) still run in docs mode with a dummy/safe `sys`; sends and writes are suppressed, a docs-mode guard shows the handler doc before real side effects, and intermediate state lives in `sys.state` and is discarded when docs mode deactivates.
 4. When the user triggers a registered action, the action `info` text is shown instead of executing the action.
 5. The display handler receives `{ content, sid }` and renders the markdown in the details window.
+6. `docs.get_toc()` lets the UI browse all actions and handler docs without triggering any gesture.
 
 ### Admin Setup (Root Module)
 
