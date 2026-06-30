@@ -3250,7 +3250,7 @@ function create_context (filename, sid) {
 (function (global){(function (){
 // --- Main Export ---
 // Usage: const docs = DOCS(__filename)(opts.sid)
-//        docs.wrap(handler, docContent)
+//        docs.wrap_isolated(handler_string, docContent)
 // Admin: Only first caller (root module) gets admin API
 
 module.exports = function DOCS (filename) {
@@ -3265,17 +3265,22 @@ if (!scope.__DOCS_GLOBAL_STATE__) {
     docs_mode_listeners: [],
     doc_display_callback: null,
     action_registry: new Map(),
+    handler_doc_registry: new Map(),
+    ephemeral_state: new Map(),
     missing_resource_warnings: new Set()
   }
 }
 
 const state = scope.__DOCS_GLOBAL_STATE__
+state.handler_doc_registry = state.handler_doc_registry || new Map()
+state.ephemeral_state = state.ephemeral_state || new Map()
 state.missing_resource_warnings = state.missing_resource_warnings || new Set()
 
 // --- Static Methods (called as DOCS.method()) ---
 // Exported via DOCS admin API (only available to first caller)
 function set_docs_mode (active) {
   state.docs_mode_active = active
+  if (!active) clear_ephemeral_state()
   state.docs_mode_listeners.forEach(listener => listener(active))
 }
 
@@ -3298,7 +3303,43 @@ function get_actions (sid) {
 
 function list_registered () { return Array.from(state.action_registry.keys()) }
 
+function get_toc (sid) {
+  return {
+    actions: state.action_registry.get(sid) || [],
+    handlers: state.handler_doc_registry.get(sid) || []
+  }
+}
+
 // --- Internal Helpers ---
+
+function resolve_handler_doc (handler, doc) {
+  if (doc !== undefined) return doc
+  if (handler && handler.docs !== undefined) return handler.docs
+  if (handler && handler.info !== undefined) return handler.info
+  return doc
+}
+
+function register_handler_doc (meta) {
+  if (meta.doc === undefined || meta.doc === null) return
+  const list = state.handler_doc_registry.get(meta.sid) || []
+  if (list.some(entry => entry.event_type === meta.event_type && entry.doc === meta.doc)) return
+  list.push({ doc: meta.doc, event_type: meta.event_type, component: meta.component })
+  state.handler_doc_registry.set(meta.sid, list)
+}
+
+function clear_handler_docs (sid) { state.handler_doc_registry.delete(sid) }
+
+function get_ephemeral_state (meta) {
+  let store = state.ephemeral_state.get(meta)
+  if (!store) { store = {}; state.ephemeral_state.set(meta, store) }
+  return store
+}
+
+function clear_ephemeral_state () {
+  state.ephemeral_state.forEach(store => {
+    for (const key of Object.keys(store)) delete store[key]
+  })
+}
 
 function verify_actions (actions) {
   if (!Array.isArray(actions)) throw new Error('DOCS: Actions must be array')
@@ -3345,6 +3386,7 @@ function create_sys_api (meta) {
     _: messages,
     drive,
     sdb,
+    state: get_ephemeral_state(meta),
     get_drive: () => drive,
     get_sdb: () => sdb
   }
@@ -3484,10 +3526,11 @@ function wrap (handler, meta = {}, make_sys = create_sys_api, options = {}) {
   }
 }
 
-function wrap_isolated (handler_string, meta = {}) {
+function wrap_isolated (handler_string, meta = {}, options = {}) {
   try {
     const params = 'meta, make_sys'
-    const source = `return (${wrap.toString()})(${handler_string}, ${params}, { run_in_docs_mode: true })`
+    const run_in_docs_mode = options.run_in_docs_mode !== false
+    const source = `return (${wrap.toString()})(${handler_string}, ${params}, { run_in_docs_mode: ${run_in_docs_mode} })`
     // eslint-disable-next-line no-new-func
     const isolated_fn = new Function(params, source)(meta, create_sys_api)
     return isolated_fn
@@ -3508,6 +3551,7 @@ function hook (dom, meta = {}) {
   function hook_event_handler (key) {
     if (key.startsWith('on') && typeof dom[key] === 'function') {
       const original = dom[key]
+      register_handler_doc({ ...meta, event_type: key, doc: resolve_handler_doc(original, meta.doc) })
       dom[key] = wrap(original, { ...meta, event_type: key })
     }
   }
@@ -3538,6 +3582,8 @@ function create_context (filename, sid) {
     hook: hook_with_component,
     get_docs_mode,
     on_docs_mode_change,
+    get_toc: () => get_toc(sid),
+    clear_handler_docs: () => clear_handler_docs(sid),
     register_actions: register_component_actions,
     show_action_info: show_component_action_info,
     set_sys
@@ -3546,13 +3592,24 @@ function create_context (filename, sid) {
     set_docs_mode,
     set_doc_display_handler,
     get_actions,
+    get_toc,
+    clear_handler_docs,
     list_registered
   }
   const context = admin ? (admin = false, Object.assign({ admin: admin_api }, api)) : api
   return context
 
-  function wrap_with_component (handler, doc) { return wrap(handler, { doc, sid, component: filename, resources }) }
-  function wrap_isolated_with_component (handler_string, doc) { return wrap_isolated(handler_string, { doc, sid, component: filename, resources }) }
+  function wrap_with_component (handler, doc) {
+    warn_once('deprecated:wrap:' + filename, 'DOCS: docs.wrap is deprecated; use docs.wrap_isolated instead. (' + filename + ')')
+    const meta = { doc: resolve_handler_doc(handler, doc), sid, component: filename, resources }
+    register_handler_doc(meta)
+    return wrap(handler, meta)
+  }
+  function wrap_isolated_with_component (handler_string, doc, options) {
+    const meta = { doc, sid, component: filename, resources }
+    register_handler_doc(meta)
+    return wrap_isolated(handler_string, meta, options)
+  }
   function hook_with_component (dom, doc) { return hook(dom, { doc, sid, component: filename, resources }) }
   function register_component_actions (actions) { return register_actions(sid, actions) }
   function show_component_action_info (action) { return show_action_info(sid, action) }
@@ -3603,6 +3660,7 @@ async function action_bar (opts, invite) {
   const { io, _ } = net(id)
   let console_icon = {}
   const docs = DOCS(__filename)(opts.sid)
+  docs.set_sys({ _, sdb, drive })
   const subs = await sdb.watch(onbatch)
 
   let selected_action = null
@@ -3614,7 +3672,10 @@ async function action_bar (opts, invite) {
   if (invite) io.accept(invite)
 
   history_icon.innerHTML = console_icon
-  history_icon.onclick = docs.wrap(onhistory, get_doc_content)
+  history_icon.onclick = docs.wrap_isolated(
+    'function (event, sys) { if (sys.is_docs_mode()) return sys.show_doc(); sys._.up("console_history_toggle", {}, null) }',
+    get_doc_content
+  )
   const element = await quick_actions({ ...subs[0] }, io.invite('quick_actions', { up: id }))
   quick_placeholder.replaceWith(element)
 
@@ -3651,12 +3712,6 @@ async function action_bar (opts, invite) {
   function fail ({ data, type }) { console.warn('Unknown message type:', type, data) }
   function inject ({ data }) { sheet.replaceSync(data[0]) }
   function iconject ({ data }) { console_icon = data[0] }
-
-  async function onhistory () {
-    _.up('console_history_toggle', {}, null)
-    // const head2 = [by, to, mid++]
-    // _.up({ head: head2, refs, type: 'ui_focus', data: 'command_history' })
-  }
 
   // -------------------------------
   // Protocol: quick actions
@@ -4347,6 +4402,7 @@ async function actions (opts, invite) {
     update_actions_for_app: handle_update_actions_for_app_message
   }
   const { io, _ } = net(id)
+  docs.set_sys({ _, sdb, drive })
 
   await sdb.watch(onbatch)
   io.on = {
@@ -4439,13 +4495,12 @@ async function actions (opts, invite) {
     <div class="action-name">${action_data.name}</div>
     <div class="action-pin">${action_data.status && action_data.status.pinned ? hardcons.pin : hardcons.unpin}</div>
     <div class="action-default">${action_data.status && action_data.status.default ? hardcons.default : hardcons.undefault}</div>`
-    action_item.onclick = docs.wrap(on_action_item_click, action_data.info)
+    action_item.__action = action_data
+    action_item.onclick = docs.wrap_isolated(
+      'function (event, sys) { sys.trigger_action(event.currentTarget.__action, { channel: "up", type: "selected_action", data: event.currentTarget.__action }) }',
+      action_data.info
+    )
     actions_menu.appendChild(action_item)
-
-    function on_action_item_click () {
-      if (docs.show_action_info(action_data)) return
-      _.up('selected_action', {}, action_data)
-    }
   }
 
   function filter (search_term) {
@@ -4693,6 +4748,7 @@ async function console_history (opts, invite) {
   const docs = DOCS(__filename)(opts.sid)
   const debug = DEBUG(__filename)(opts.sid)
   const { io, _ } = net(id)
+  docs.set_sys({ _, sdb, drive })
   debug.on_change(on_debug_change)
 
   // Register actions with DOCS system
@@ -4790,7 +4846,11 @@ async function console_history (opts, invite) {
       ${right_html ? `<div class="command-actions">${right_html}</div>` : ''}
     </div>`
 
-    command_el.onclick = docs.wrap(on_command_click, get_doc_content)
+    command_el.__command = command_data
+    command_el.onclick = docs.wrap_isolated(
+      'function (event, sys) { if (sys.is_docs_mode()) return sys.show_doc(); var el = event.currentTarget; var previous = el.parentElement.querySelector(".command-item.selected"); if (previous) previous.classList.remove("selected"); el.classList.add("selected"); sys._.up("ui_focus", {}, { type: "command_history", sid: sys.get_meta().sid }); sys._.up("command_clicked", {}, el.__command) }',
+      get_doc_content
+    )
 
     const restore_el = command_el.querySelector('.restore-action')
     const delete_el = command_el.querySelector('.delete-action')
@@ -4805,18 +4865,6 @@ async function console_history (opts, invite) {
     function on_delete_click (e) {
       e.stopPropagation()
       resolve_closed_tab(command_data, 'Deleted', false)
-    }
-
-    async function on_command_click () {
-      const previous = commands_list.querySelector('.command-item.selected')
-      if (previous) previous.classList.remove('selected')
-      command_el.classList.add('selected')
-      const data = {
-        type: 'command_history',
-        sid: opts.sid
-      }
-      _.up('ui_focus', {}, data)
-      _.up('command_clicked', {}, command_data)
     }
 
     async function get_doc_content () {
@@ -5441,12 +5489,9 @@ async function form_click_rate_test (opts, invite) {
     data: ondata
   }
 
-  let current_step = null
-  let click_count = 0
-  let start_time = 0
-  let input_accessible = true
   const docs = DOCS(__filename)(opts.sid)
   const { io, _ } = net(id)
+  docs.set_sys({ _, sdb, drive })
   const milliseconds_action = {
     name: 'Click Rate Result',
     info: 'Calculate and submit the milliseconds taken to complete 10 clicks.',
@@ -5477,10 +5522,17 @@ async function form_click_rate_test (opts, invite) {
   const count_el = shadow.querySelector('.count')
   const result_el = shadow.querySelector('.result')
 
-  on_click_event_doc.info = 'Record one click in the 10-click sequence. This event is not an action until the 10th click.'
-  const show_click_event_doc = docs.wrap(on_click_event_doc)
-  button.onclick = on_click
+  button.__action = milliseconds_action
+  button.__accessible = true
+  button.__step_index = 0
+  button.__count = 0
+  button.__start = 0
+  button.onclick = docs.wrap_isolated(
+    'function (event, sys) { var btn = event.currentTarget; var count_el = btn.querySelector(".count"); var result_el = btn.parentElement.querySelector(".result"); if (sys.is_docs_mode()) { var s = sys.state; s.count = (s.count || 0) + 1; count_el.textContent = s.count; if (s.count < 10) { sys.show_doc(); return } sys.show_action_info(btn.__action); return } if (!btn.__accessible) return; if (btn.__count === 0) btn.__start = Date.now(); btn.__count += 1; count_el.textContent = btn.__count; if (btn.__count < 10) { sys.drive.put("data/form_click_rate_test.json", { click_count: btn.__count, result: "" }); sys._.up("action_incomplete", {}, { value: btn.__count, index: btn.__step_index }); return } var result = "10 clicks in " + (Date.now() - btn.__start) + " ms"; result_el.textContent = result; sys.drive.put("data/form_click_rate_test.json", { click_count: btn.__count, result: result }); sys._.up("action_submitted", {}, { value: result, index: btn.__step_index }); sys._.up("action_complete", {}, { value: result }) }',
+    'Record one click in the 10-click sequence. This event is not an action until the 10th click.'
+  )
   docs.register_actions([milliseconds_action])
+  docs.on_docs_mode_change(on_docs_mode_change)
 
   await sdb.watch(onbatch)
 
@@ -5528,15 +5580,15 @@ async function form_click_rate_test (opts, invite) {
 
   function ondata (data) {
     if (data.length === 0 || !data[0]) return
-    click_count = data[0].click_count || 0
+    button.__count = data[0].click_count || 0
     update_count()
     if (data[0].result) show_result(data[0].result)
   }
 
   function step_data (data) {
-    current_step = data
-    input_accessible = data.is_accessible !== false
-    button.disabled = !input_accessible
+    button.__accessible = data.is_accessible !== false
+    button.__step_index = data.index !== undefined ? data.index : 0
+    button.disabled = !button.__accessible
     reset_clicks()
   }
 
@@ -5548,50 +5600,18 @@ async function form_click_rate_test (opts, invite) {
     })
   }
 
-  function on_click_event_doc () {}
-
-  async function on_click (event) {
-    if (!input_accessible) return
-    if (click_count === 0) start_time = Date.now()
-
-    click_count += 1
-    update_count()
-
-    if (click_count < 10) {
-      await show_click_event_doc(event)
-      await drive.put('data/form_click_rate_test.json', { click_count, result: '' })
-      _.up('action_incomplete', {}, { value: click_count, index: get_step_index() })
-      return
-    }
-
-    await run_milliseconds_action()
-  }
-
-  async function run_milliseconds_action () {
-    if (docs.show_action_info(milliseconds_action)) return
-
-    const result = '10 clicks in ' + get_elapsed_time() + ' ms'
-    show_result(result)
-    await drive.put('data/form_click_rate_test.json', { click_count, result })
-    _.up('action_submitted', {}, { value: result, index: get_step_index() })
-    _.up('action_complete', {}, { value: result })
-  }
-
-  function get_elapsed_time () { return Date.now() - start_time }
-
-  function get_step_index () {
-    if (current_step && current_step.index !== undefined) return current_step.index
-    return 0
+  function on_docs_mode_change (active) {
+    if (!active) update_count()
   }
 
   function reset_clicks () {
-    click_count = 0
-    start_time = 0
+    button.__count = 0
+    button.__start = 0
     result_el.textContent = ''
     update_count()
   }
 
-  function update_count () { count_el.textContent = click_count }
+  function update_count () { count_el.textContent = button.__count }
   function show_result (result) { result_el.textContent = result }
 }
 
@@ -7603,15 +7623,32 @@ async function quick_actions (opts, invite) {
   let action_selected = false
   const docs = DOCS(__filename)(opts.sid)
   const { io, _ } = net(id)
+  docs.set_sys({ _, sdb, drive })
 
   io.on = {
     up: io_up()
   }
   if (invite) io.accept(invite)
-  text_bar.onclick = docs.wrap(activate_input_field, get_doc_content)
-  close_btn.onclick = docs.wrap(deactivate_input_field, get_doc_content)
-  confirm_btn.onclick = docs.wrap(onconfirm, get_doc_content)
-  submit_btn.onclick = docs.wrap(onsubmit, get_doc_content)
+  text_bar.__fn = activate_input_field
+  text_bar.onclick = docs.wrap_isolated(
+    'function (event, sys) { event.currentTarget.__fn() }',
+    get_doc_content,
+    { run_in_docs_mode: false }
+  )
+  close_btn.__fn = deactivate_input_field
+  close_btn.onclick = docs.wrap_isolated(
+    'function (event, sys) { event.currentTarget.__fn() }',
+    get_doc_content,
+    { run_in_docs_mode: false }
+  )
+  confirm_btn.onclick = docs.wrap_isolated(
+    'function (event, sys) { sys.trigger_action(event.currentTarget.__action, { channel: "up", type: "activate_steps_wizard", data: event.currentTarget.__command }) }',
+    get_doc_content
+  )
+  submit_btn.onclick = docs.wrap_isolated(
+    'function (event, sys) { sys.trigger_action(event.currentTarget.__action, { channel: "up", type: "action_submitted", data: null }) }',
+    get_doc_content
+  )
   input_field.oninput = oninput
 
   await sdb.watch(onbatch)
@@ -7623,13 +7660,6 @@ async function quick_actions (opts, invite) {
     return doc_file.raw || 'No documentation available'
   }
 
-  function onsubmit () {
-    _.up('action_submitted', {}, null)
-  }
-
-  function onconfirm () {
-    _.up('activate_steps_wizard', {}, stored_selected_action)
-  }
   function oninput (e) {
     const value = e.target.value
     if (enable_input_field_tooltips) update_input_tooltip(value)
@@ -7781,15 +7811,14 @@ async function quick_actions (opts, invite) {
       btn.onmouseenter = on_action_btn_mouseenter
       btn.onmouseleave = hide_tooltip
     }
-    btn.onclick = docs.wrap(onclick, action.info)
+    btn.__action = action
+    btn.onclick = docs.wrap_isolated(
+      'function (event, sys) { sys.trigger_action(event.currentTarget.__action, { channel: "up", type: "update_quick_actions_input", data: event.currentTarget.__action }) }',
+      action.info
+    )
     default_actions.appendChild(btn)
 
     function on_action_btn_mouseenter () { show_tooltip(btn, action.name) }
-
-    function onclick () {
-      if (docs.show_action_info(action)) return
-      _.up('update_quick_actions_input', {}, action)
-    }
   }
 
   function update_input_tooltip (value) {
@@ -7850,6 +7879,7 @@ async function quick_actions (opts, invite) {
   function update_input_command (command) {
     if (action_selected) return
     stored_selected_action = command
+    confirm_btn.__command = command
     if (input_wrapper.style.display === 'none') {
       default_actions.style.display = 'none'
       text_bar.style.display = 'none'
@@ -7860,6 +7890,9 @@ async function quick_actions (opts, invite) {
 
     // Find the action that matches the command
     const matching_action = defaults.find(matches_selected_command)
+    const selected = matching_action || command
+    confirm_btn.__action = selected
+    submit_btn.__action = selected
 
     if (matching_action) {
       if (docs.show_action_info(matching_action)) return
@@ -8671,6 +8704,7 @@ async function steps_wizard (opts, invite) {
   let currentActiveStep = 0
   const docs = DOCS(__filename)(opts.sid)
   const { io, _ } = net(id)
+  docs.set_sys({ _, sdb, drive })
 
   io.on = {
     up: io_up()
@@ -8740,14 +8774,18 @@ async function steps_wizard (opts, invite) {
         btn.classList.add('active')
       }
 
-      btn.onclick = docs.wrap(on_step_click, get_doc_content)
+      btn.__fn = on_step_click
+      btn.onclick = docs.wrap_isolated(
+        'function (event, sys) { event.currentTarget.__fn(event, sys) }',
+        get_doc_content,
+        { run_in_docs_mode: false }
+      )
 
-      async function on_step_click () {
-        console.log('Clicked:', step)
+      async function on_step_click (event, sys) {
         currentActiveStep = index
         center_step(btn)
         render_steps(steps, false)
-        _.up('step_clicked', {}, { ...step, index, total_steps: steps.length, is_accessible: accessible })
+        sys._.up('step_clicked', {}, { ...step, index, total_steps: steps.length, is_accessible: accessible })
       }
 
       async function get_doc_content () {
@@ -9649,6 +9687,7 @@ async function component (opts, invite) {
   let ARROW_RIGHT_SVG = ''
   const docs = DOCS(__filename)(opts.sid)
   const { io, _ } = net(id)
+  docs.set_sys({ _, sdb, drive })
 
   // Register actions with DOCS system
   const actions_file = await drive.get('actions/commands.json')
@@ -9925,23 +9964,19 @@ async function component (opts, invite) {
 
     name_el.draggable = false
 
-    name_el.onclick = docs.wrap(on_tab_name_click, get_doc_content)
-    close_btn.onclick = docs.wrap(on_tab_close_click, get_doc_content)
+    name_el.__tab = { id, name }
+    name_el.onclick = docs.wrap_isolated(
+      'function (event, sys) { if (sys.is_docs_mode()) return sys.show_doc(); var t = event.currentTarget.__tab; sys._.up("ui_focus", {}, { type: "tab", sid: sys.get_meta().sid }); sys._.up("tab_name_clicked", {}, t) }',
+      get_doc_content
+    )
+    close_btn.__tab = { id, name }
+    close_btn.__variable_tabs = variable_tabs
+    close_btn.onclick = docs.wrap_isolated(
+      'function (event, sys) { if (sys.is_docs_mode()) return sys.show_doc(); var el = event.currentTarget.parentElement, t = event.currentTarget.__tab; event.stopPropagation(); el.remove(); delete event.currentTarget.__variable_tabs[t.id]; sys._.up("ui_focus", {}, { type: "tab", sid: sys.get_meta().sid }); sys._.up("tab_close_clicked", {}, t) }',
+      get_doc_content
+    )
     variable_tabs[id] = { el, name }
 
-    async function on_tab_name_click () {
-      const data = { type: 'tab', sid: opts.sid }
-      _.up('ui_focus', {}, data)
-      _.up('tab_name_clicked', {}, { id, name })
-    }
-    async function on_tab_close_click (e) {
-      e.stopPropagation()
-      el.remove()
-      delete variable_tabs[id]
-      const data = { type: 'tab', sid: opts.sid }
-      _.up('ui_focus', {}, data)
-      _.up('tab_close_clicked', {}, { id, name })
-    }
     async function get_doc_content () {
       const doc_file = await drive.get('docs/README.md')
       return doc_file.raw || 'No documentation available'
@@ -10144,6 +10179,7 @@ async function tabsbar (opts, invite) {
   const el = document.createElement('div')
   const shadow = el.attachShadow({ mode: 'closed' })
   const docs = DOCS(__filename)(opts.sid)
+  docs.set_sys({ _, sdb, drive })
   // Register actions with DOCS system
   const actions_file = await drive.get('actions/command.json')
   if (actions_file.raw) {
@@ -10184,7 +10220,10 @@ async function tabsbar (opts, invite) {
     const doc = parser.parseFromString(svg, 'image/svg+xml')
     const svgElem = doc.documentElement
     hat_btn.replaceChildren(svgElem)
-    hat_btn.onclick = docs.wrap(hat_click, get_doc_content)
+    hat_btn.onclick = docs.wrap_isolated(
+      'function (event, sys) { if (sys.is_docs_mode()) return sys.show_doc(); sys._.up("ui_focus", {}, { type: "wizard_hat", sid: sys.get_meta().sid }) }',
+      get_doc_content
+    )
   }
   if (dricons[0]) {
     onload(dricons[0])
@@ -10221,13 +10260,6 @@ async function tabsbar (opts, invite) {
     return doc_file.raw || 'No documentation available'
   }
 
-  async function hat_click () {
-    const data = {
-      type: 'wizard_hat',
-      sid: opts.sid
-    }
-    _.up('ui_focus', {}, data)
-  }
   function io_up () {
     return function onmessage (msg) {
       const handler = on_message[msg.type] || onmessage_fail
@@ -10585,6 +10617,7 @@ async function task_manager (opts, invite) {
     count: update_count
   }
   const { io, _ } = net(id)
+  docs.set_sys({ _, sdb, drive })
 
   const el = document.createElement('div')
   const shadow = el.attachShadow({ mode: 'closed' })
@@ -10602,18 +10635,11 @@ async function task_manager (opts, invite) {
   }
   if (invite) io.accept(invite)
 
-  // DOCS.wrap() is used for automatic docs mode hook
-  btn.onclick = docs.wrap(on_task_manager_click, get_doc_content)
-
-  async function on_task_manager_click () {
-    if (_) {
-      const data = {
-        type: 'task_manager',
-        sid: opts.sid
-      }
-      _.up('ui_focus', {}, data)
-    }
-  }
+  // DOCS.wrap_isolated() is used for automatic docs mode hook
+  btn.onclick = docs.wrap_isolated(
+    'function (event, sys) { if (sys.is_docs_mode()) return sys.show_doc(); sys._.up("ui_focus", {}, { type: "task_manager", sid: sys.get_meta().sid }) }',
+    get_doc_content
+  )
 
   async function get_doc_content () {
     const doc_file = await drive.get('docs/README.md')
