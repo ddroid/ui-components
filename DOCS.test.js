@@ -155,4 +155,102 @@ describe('DOCS sys API', () => {
     await expect(event.subs).resolves.toEqual([])
     expect(warn).toHaveBeenCalled()
   })
+
+  it('keeps sys.state across calls and clears it when docs mode deactivates', async () => {
+    const docs = create_docs()
+    docs.admin.set_docs_mode(true)
+
+    const handler = docs.wrap_isolated(
+      'function (event, sys) { sys.state.clicks = (sys.state.clicks || 0) + 1; event.clicks = sys.state.clicks }',
+      'Stateful docs'
+    )
+
+    const event1 = {}
+    const event2 = {}
+    await handler(event1)
+    await handler(event2)
+    expect(event1.clicks).toBe(1)
+    expect(event2.clicks).toBe(2)
+
+    docs.admin.set_docs_mode(false)
+    const event3 = {}
+    await handler(event3)
+    expect(event3.clicks).toBe(1)
+  })
+
+  it('lists registered actions and handler docs in get_toc', () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const docs = create_docs()
+    docs.register_actions([create_action()])
+    docs.wrap_isolated('function (event, sys) {}', '# Handler One\nDocs.')
+    docs.wrap(function onclick () {}, '# Handler Two\nDocs.')
+
+    const toc = docs.get_toc()
+
+    expect(toc.actions).toHaveLength(1)
+    expect(toc.actions[0].name).toBe('Open File')
+    expect(toc.handlers).toHaveLength(2)
+    expect(toc.handlers[0].doc).toBe('# Handler One\nDocs.')
+    expect(toc.handlers[1].doc).toBe('# Handler Two\nDocs.')
+  })
+
+  it('does not duplicate handler docs for repeated wraps and clears via clear_handler_docs', () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const docs = create_docs()
+    docs.wrap_isolated('function (event, sys) {}', '# Same\nDocs.')
+    docs.wrap_isolated('function (event, sys) {}', '# Same\nDocs.')
+    docs.wrap(function onclick () {}, '# Other\nDocs.')
+
+    expect(docs.get_toc().handlers).toHaveLength(2)
+
+    docs.clear_handler_docs()
+    expect(docs.get_toc().handlers).toHaveLength(0)
+
+    docs.wrap_isolated('function (event, sys) {}', '# Same\nDocs.')
+    expect(docs.get_toc().handlers).toHaveLength(1)
+  })
+
+  it('shows doc instead of running wrap_isolated when run_in_docs_mode is false', async () => {
+    const docs = create_docs()
+    const displays = []
+    docs.admin.set_doc_display_handler(display => displays.push(display))
+    docs.admin.set_docs_mode(true)
+
+    const handler = docs.wrap_isolated(
+      'function (event, sys) { event.ran = true }',
+      '# Show Doc\nShown in docs mode.',
+      { run_in_docs_mode: false }
+    )
+    const event = { preventDefault: vi.fn(), stopPropagation: vi.fn() }
+
+    await handler(event)
+
+    expect(event.ran).toBeUndefined()
+    expect(event.preventDefault).toHaveBeenCalled()
+    expect(event.stopPropagation).toHaveBeenCalled()
+    expect(displays).toEqual([{ content: '# Show Doc\nShown in docs mode.', sid: 'sid_1' }])
+  })
+
+  it('runs wrap_isolated body in normal mode when run_in_docs_mode is false', async () => {
+    const docs = create_docs()
+    const sent = []
+    docs.set_sys({
+      _: {
+        up: function up (type, refs, data) {
+          sent.push({ type, refs, data })
+          return ['sid_1', 'parent', 0]
+        }
+      }
+    })
+
+    const handler = docs.wrap_isolated(
+      'function (event, sys) { sys._.up("clicked", {}, null) }',
+      '# Click\nSends a click.',
+      { run_in_docs_mode: false }
+    )
+
+    await handler({})
+
+    expect(sent).toEqual([{ type: 'clicked', refs: {}, data: null }])
+  })
 })
