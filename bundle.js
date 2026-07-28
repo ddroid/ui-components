@@ -9680,6 +9680,9 @@ async function component (opts, invite) {
   let dricons = []
   let active = null
   let tab_group_el = null
+  let nested_collapse_el = null
+  const expanded_groups = {}
+  let current_collapse_data = null
   let tab_group_expanded = false
   let tile_is_focused = false
   const default_tabs = {}
@@ -9687,11 +9690,11 @@ async function component (opts, invite) {
   const variable_tabs = {}
   let ARROW_LEFT_SVG = ''
   let ARROW_RIGHT_SVG = ''
+  let SEPARATOR_SVG = ''
   const docs = DOCS(__filename)(opts.sid)
   const { io, _ } = net(id)
   docs.set_sys({ _, sdb, drive })
 
-  // Register actions with DOCS system
   const actions_file = await drive.get('actions/commands.json')
   if (actions_file.raw) {
     const actions_data = typeof actions_file.raw === 'string' ? JSON.parse(actions_file.raw) : actions_file.raw
@@ -9782,7 +9785,10 @@ async function component (opts, invite) {
     function handle_add_link_tab ({ data }) { add_link_tab(data) }
     function handle_remove_link_tab ({ data }) { remove_link_tab(data) }
     function handle_add_default_tab ({ data }) { add_default_tab(data) }
-    function handle_restore_tab ({ data }) { create_btn({ name: data.name, id: data.id }) }
+    function handle_restore_tab ({ data }) { 
+      create_btn({ name: data.name, id: data.id })
+      sync_tab_count() 
+    }
     function handle_show_collapsed_tab_group ({ data }) { show_collapsed_tab_group(data) }
     function handle_hide_collapsed_tab_group () { hide_collapsed_tab_group() }
     function handle_tile_focus_changed ({ data }) { update_tab_focus_state(data) }
@@ -9791,7 +9797,7 @@ async function component (opts, invite) {
   }
 
   function add_default_tab ({ name, program, tile_id, id }) {
-    const tab_id = id || `tab_${Date.now()}`
+    const tab_id = id || 'tab_' + Date.now()
     if (default_tabs[tab_id]) {
       console.error('tabs: default tab already exists', tab_id)
       return
@@ -9813,6 +9819,7 @@ async function component (opts, invite) {
     entries.appendChild(el)
     console.error('tabs: default tab added', tab_id)
     sync_tab_count()
+    sync_separators()
 
     function switch_active () {
       console.error('tabs: default tab clicked', tab_id)
@@ -9834,11 +9841,12 @@ async function component (opts, invite) {
       if (Object.keys(default_tabs).length === 0) {
         _.up('all_tabs_closed', {}, null)
       }
+      sync_separators()
     }
   }
 
   function add_link_tab ({ tile_id, name, direction }) {
-    const link_tab_id = `split_tile_${tile_id}`
+    const link_tab_id = 'split_tile_' + tile_id
     if (link_tabs[link_tab_id]) {
       console.error('tabs: link tab already exists', link_tab_id)
       return
@@ -9853,6 +9861,7 @@ async function component (opts, invite) {
     el.onclick = on_link_tab_click
     entries.appendChild(el)
     console.error('tabs: link tab added', link_tab_id)
+    sync_separators()
 
     function on_link_tab_click () {
       console.error('tabs: link tab clicked', link_tab_id)
@@ -9861,28 +9870,28 @@ async function component (opts, invite) {
   }
 
   function remove_link_tab ({ tile_id }) {
-    const link_tab_id = `split_tile_${tile_id}`
+    const link_tab_id = 'split_tile_' + tile_id
     const tab = link_tabs[link_tab_id]
     if (tab) {
       tab.el.remove()
       delete link_tabs[link_tab_id]
       console.error('tabs: link tab removed', link_tab_id)
+      sync_separators()
     }
   }
 
-  // ---------------------------
-  // COLLAPSED TAB GROUP
-  // Shows collapsed tile's tabs inline (like Chrome tab groups)
-  // ---------------------------
+  function show_collapsed_tab_group (data) {
+    if (data.nested) {
+      show_nested_collapse(data)
+      return
+    }
 
-  function show_collapsed_tab_group ({ tiles }) {
+    const { tiles } = data
     if (tab_group_el) hide_collapsed_tab_group()
 
-    // Container holds the group tab + inline child tabs
     tab_group_el = document.createElement('div')
     tab_group_el.className = 'tab-group-inline'
 
-    // Group tab — styled same as default tabs
     const group_tab = document.createElement('div')
     group_tab.className = 'tabsbtn tab-group-tab'
     const direction = (tiles[0] && tiles[0].direction) || 'right'
@@ -9891,36 +9900,36 @@ async function component (opts, invite) {
     group_tab.onclick = toggle_tab_group_expand
     tab_group_el.appendChild(group_tab)
 
-    // Child tabs — the actual tabs from the collapsed tile, shown inline
     const children_container = document.createElement('div')
     children_container.className = 'tab-group-children'
 
     for (const tile of tiles) {
-      const tile_tabs = tile.tabs || []
-      for (const tab of tile_tabs) {
+      const tile_tab_list = tile.tabs || []
+      for (const tab of tile_tab_list) {
         const tab_el = document.createElement('div')
         tab_el.className = 'tabsbtn tab-group-child'
         tab_el.innerHTML = `<span class="icon">${dricons[1] || '📄'}</span><span class="name">${tab.name || 'Tab'}</span>`
         tab_el.onclick = on_child_tab_click(tile.tile_id)
         children_container.appendChild(tab_el)
       }
-      // If no tabs tracked, show at least one entry
-      if (tile_tabs.length === 0) {
-        const tab_el = document.createElement('div')
-        tab_el.className = 'tabsbtn tab-group-child'
-        tab_el.innerHTML = `<span class="icon">${dricons[1] || '📄'}</span><span class="name">New Tab</span>`
-        tab_el.onclick = on_child_tab_click(tile.tile_id)
-        children_container.appendChild(tab_el)
+      if (tile_tab_list.length === 0) {
+        const placeholder_el = document.createElement('div')
+        placeholder_el.className = 'tabsbtn tab-group-child'
+        placeholder_el.innerHTML = `<span class="icon">${dricons[1] || '📄'}</span><span class="name">New Tab</span>`
+        placeholder_el.onclick = on_child_tab_click(tile.tile_id)
+        children_container.appendChild(placeholder_el)
       }
     }
 
     tab_group_el.appendChild(children_container)
     entries.insertBefore(tab_group_el, entries.firstChild)
     console.error('tabs: collapsed tab group shown')
+    sync_separators()
 
     function toggle_tab_group_expand () {
       tab_group_expanded = !tab_group_expanded
       tab_group_el.classList.toggle('expanded', tab_group_expanded)
+      sync_separators()
     }
 
     function on_child_tab_click (tile_id) {
@@ -9938,14 +9947,175 @@ async function component (opts, invite) {
       tab_group_expanded = false
       console.error('tabs: collapsed tab group hidden')
     }
+    if (nested_collapse_el) {
+      nested_collapse_el.remove()
+      nested_collapse_el = null
+      console.error('tabs: nested collapse hidden')
+    }
+    sync_separators()
   }
 
-  // ---------------------------
-  // FOCUS STATE
-  // Updates active tab styling based on tile focus:
-  // - Tile in focus: active tab gets highlight background
-  // - Tile NOT in focus: active tab gets highlight border only
-  // ---------------------------
+  function show_nested_collapse (data) {
+    console.error('tabs: show_nested_collapse', data)
+    current_collapse_data = data
+    if (tab_group_el) {
+      tab_group_el.remove()
+      tab_group_el = null
+    }
+    if (nested_collapse_el) {
+      nested_collapse_el.remove()
+      nested_collapse_el = null
+    }
+
+    const { collapsed_groups } = data
+
+    if (!collapsed_groups || collapsed_groups.length === 0) return
+
+    nested_collapse_el = document.createElement('div')
+    nested_collapse_el.className = 'nested-collapse-container'
+
+    function get_first_leaf_node (node) {
+      if (!node) return null
+      if (node.type === 'leaf') return node
+      if (node.children && node.children.length > 0) {
+        return get_first_leaf_node(node.children[0])
+      }
+      return null
+    }
+
+    // `depth` is the nesting depth in the collapsed strip, it drives the size ramp in CSS.
+    function render_leaf_tab (lt, leaf, depth, is_header = false, is_expanded = false, parent_group = null) {
+      const el = document.createElement('div')
+      el.className = `tabsbtn nested-leaf-tab depth-${Math.min(depth + 1, 3)}`
+      if (active && active.querySelector('.name')?.textContent === (lt.name || 'Tab')) {
+        el.classList.add('active')
+      }
+
+      let arrow_btn_html = ''
+      if (is_header && parent_group) {
+        const icon_svg = is_expanded ? ARROW_LEFT_SVG : ARROW_RIGHT_SVG
+        arrow_btn_html = `<span class="icon group-arrow-btn">${icon_svg}</span>`
+      }
+
+      // A folded tab is a pointer to another tile, not an owned tab, so it has no close
+      // button: closing stays with the tile that owns the tab.
+      el.innerHTML = `
+        ${arrow_btn_html}
+        <span class="icon">${dricons[1] || '📄'}</span>
+        <span class="name">${lt.name || 'Tab'}</span>`
+
+      if (is_header && parent_group) {
+        const arrow_btn = el.querySelector('.group-arrow-btn')
+        if (arrow_btn) {
+          arrow_btn.onclick = (e) => {
+            e.stopPropagation()
+            expanded_groups[parent_group.split_id] = !is_expanded
+            show_nested_collapse(current_collapse_data)
+          }
+        }
+      }
+
+      const name_el = el.querySelector('.name')
+      if (name_el) {
+        name_el.onclick = on_folded_tab_click
+      }
+
+      return el
+
+      // Clicking a folded tab asks the tile manager to bring that tile back on screen.
+      function on_folded_tab_click () {
+        if (active) active.classList.remove('active')
+        el.classList.add('active')
+        active = el
+        _.up('ui_focus', {}, { type: 'tab', sid: opts.sid })
+        _.up('tab_group_tile_clicked', {}, { tile_id: leaf.tile_id, id: lt.id, name: lt.name })
+      }
+    }
+
+    function render_node_to_dom (node, depth, is_header_child = false, parent_group = null) {
+      if (!node) return null
+
+      if (node.type === 'leaf') {
+        const leaf_container = document.createElement('div')
+        leaf_container.className = 'nested-group-leaf'
+        leaf_container.setAttribute('data-depth', depth)
+
+        let leaf_tabs = node.tabs || []
+        if (leaf_tabs.length === 0) {
+          leaf_tabs = [{ id: 'placeholder', name: 'New Tab', tile_id: node.tile_id }]
+        }
+
+        if (is_header_child && parent_group) {
+          const is_expanded = !!expanded_groups[parent_group.split_id]
+          const header_tab = render_leaf_tab(leaf_tabs[0], node, depth, true, is_expanded, parent_group)
+          leaf_container.appendChild(header_tab)
+
+          if (is_expanded) {
+            for (let i = 1; i < leaf_tabs.length; i++) {
+              const normal_tab = render_leaf_tab(leaf_tabs[i], node, depth, false, false, null)
+              leaf_container.appendChild(normal_tab)
+            }
+          }
+        } else {
+          for (const lt of leaf_tabs) {
+            const normal_tab = render_leaf_tab(lt, node, depth, false, false, null)
+            leaf_container.appendChild(normal_tab)
+          }
+        }
+
+        return leaf_container
+      }
+
+      if (node.type === 'collapsed_group' || node.type === 'split_group') {
+        const is_expanded = !!expanded_groups[node.split_id]
+
+        if (!is_expanded) {
+          const first_leaf = get_first_leaf_node(node)
+          if (!first_leaf) return null
+
+          let leaf_tabs = first_leaf.tabs || []
+          if (leaf_tabs.length === 0) {
+            leaf_tabs = [{ id: 'placeholder', name: 'New Tab', tile_id: first_leaf.tile_id }]
+          }
+
+          const leaf_container = document.createElement('div')
+          leaf_container.className = 'nested-group-leaf'
+          leaf_container.setAttribute('data-depth', depth)
+
+          const header_tab = render_leaf_tab(leaf_tabs[0], first_leaf, depth, true, false, node)
+          leaf_container.appendChild(header_tab)
+          return leaf_container
+        } else {
+          const group_container = document.createElement('div')
+          group_container.className = `nested-group-container depth-${depth} expanded`
+          group_container.setAttribute('data-depth', depth)
+
+          if (node.children && node.children.length > 0) {
+            const first_child_el = render_node_to_dom(node.children[0], depth, true, node)
+            if (first_child_el) group_container.appendChild(first_child_el)
+
+            for (let i = 1; i < node.children.length; i++) {
+              const child_el = render_node_to_dom(node.children[i], depth + 1, false, null)
+              if (child_el) group_container.appendChild(child_el)
+            }
+          }
+
+          return group_container
+        }
+      }
+
+      return null
+    }
+
+    for (const group of collapsed_groups) {
+      const group_el = render_node_to_dom(group, 0, false, null)
+      if (group_el) nested_collapse_el.appendChild(group_el)
+    }
+
+    entries.insertBefore(nested_collapse_el, entries.firstChild)
+    console.error('tabs: nested collapse shown with', collapsed_groups.length, 'groups')
+    sync_separators()
+  }
 
   function update_tab_focus_state ({ is_focused }) {
     entries.classList.toggle('tile-focused', is_focused)
@@ -9985,18 +10155,78 @@ async function component (opts, invite) {
     )
     close_btn.__tab = { id, name }
     close_btn.__variable_tabs = variable_tabs
-    close_btn.onclick = docs.wrap_isolated(
-      'function (event, sys) { if (sys.is_docs_mode()) return sys.show_doc(); var el = event.currentTarget.parentElement, t = event.currentTarget.__tab; event.stopPropagation(); el.remove(); delete event.currentTarget.__variable_tabs[t.id]; sys._.up("ui_focus", {}, { type: "tab", sid: sys.get_meta().sid }); sys._.up("tab_close_clicked", {}, t) }',
-      get_doc_content
-    )
+    close_btn.onclick = docs.wrap(on_tab_close_click, get_doc_content)
     variable_tabs[id] = { el, name }
 
+    async function on_tab_name_click () {
+      const data = { type: 'tab', sid: opts.sid }
+      _.up('ui_focus', {}, data)
+      _.up('tab_name_clicked', {}, { id, name })
+    }
+    async function on_tab_close_click (e) {
+      e.stopPropagation()
+      el.remove()
+      delete variable_tabs[id]
+      const data = { type: 'tab', sid: opts.sid }
+      _.up('ui_focus', {}, data)
+      _.up('tab_close_clicked', {}, { id, name })
+      sync_tab_count()
+    }
     async function get_doc_content () {
       const doc_file = await drive.get('docs/README.md')
       return doc_file.raw || 'No documentation available'
     }
 
     entries.appendChild(el)
+    sync_separators()
+  }
+
+  function create_separator () {
+    const sep = document.createElement('div')
+    sep.className = 'tab-separator'
+    sep.innerHTML = `
+      <svg width="2" height="24" viewBox="0 0 2 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <line x1="1" y1="2" x2="1" y2="22" stroke="#666666" stroke-width="1.5" stroke-linecap="round"/>
+      </svg>
+    `
+    return sep
+  }
+
+  function sync_separators () {
+    const existing_seps = entries.querySelectorAll(':scope > .tab-separator')
+    for (const sep of existing_seps) {
+      sep.remove()
+    }
+
+    const main_children = Array.from(entries.children).filter(child => {
+      if (child.style.display === 'none') return false
+      return child.classList.contains('tabsbtn') || 
+             child.classList.contains('nested-collapse-container') ||
+             child.classList.contains('tab-group-inline')
+    })
+
+    for (let i = 0; i < main_children.length - 1; i++) {
+      const sep = create_separator()
+      entries.insertBefore(sep, main_children[i].nextSibling)
+    }
+
+    if (nested_collapse_el) {
+      const group_children = Array.from(nested_collapse_el.children).filter(child => {
+        if (child.style.display === 'none') return false
+        return child.classList.contains('nested-group-container') ||
+               child.classList.contains('nested-group-leaf')
+      })
+
+      const existing_nested_seps = nested_collapse_el.querySelectorAll(':scope > .tab-separator')
+      for (const sep of existing_nested_seps) {
+        sep.remove()
+      }
+
+      for (let i = 0; i < group_children.length - 1; i++) {
+        const sep = create_separator()
+        nested_collapse_el.insertBefore(sep, group_children[i].nextSibling)
+      }
+    }
   }
 
   async function onbatch (batch) {
@@ -10009,7 +10239,6 @@ async function component (opts, invite) {
       if (!opts.ids) variables.forEach(create_btn)
       init = true
     } else {
-      // TODO: Here we can handle drive updates
     }
 
     function load_path_raw (path) { return drive.get(path).then(read_drive_file_raw) }
@@ -10027,10 +10256,10 @@ async function component (opts, invite) {
     dricons = data
     ARROW_LEFT_SVG = data[4] || ''
     ARROW_RIGHT_SVG = data[5] || ''
+    SEPARATOR_SVG = data[6] || ''
   }
 
   function update_scroll_position () {
-    // TODO
   }
 
   function onscroll (data) {
@@ -10084,6 +10313,9 @@ function fallback_module () {
           },
           '5.svg': {
             $ref: 'arrow-right.svg'
+          },
+          '6.svg': {
+            $ref: 'separator.svg'
           }
         },
         'actions/': {
@@ -11390,7 +11622,7 @@ const tab_group = require('tab_group')
 
 module.exports = tile_manager
 
-async function tile_manager (opts, invite) {
+async function tile_manager(opts, invite) {
   const { id, sdb } = await get(opts.sid)
   const { drive } = sdb
 
@@ -11399,9 +11631,10 @@ async function tile_manager (opts, invite) {
   }
 
   const layout = {
-    root: create_leaf_node(0),
-    collapsed: false, // responsive collapse state
-    focused_tile: 0 // currently focused tile id
+    root: { type: 'leaf', tile_id: 0, el: null },
+    collapse_level: 0,
+    manual_level: null,
+    focused_tile: 0
   }
   const tile_registry = {}
 
@@ -11411,18 +11644,24 @@ async function tile_manager (opts, invite) {
     update_steps_wizard_for_app: null
   }
 
-  // Track tabs per tile so we can show them in tab groups on collapse
-  const tile_tabs = {} // tile_id -> [{ id, name, program }]
+  const tile_tabs = {}
 
   let tile_counter = 1
-  const COLLAPSE_THRESHOLD = 600
+  let split_counter = 1
+  let last_width = 0
+  let last_height = 0
+  const MIN_TILE_WIDTH = 300
+  const MIN_TILE_HEIGHT = 200
   const { io, _ } = net(id)
 
   const el = document.createElement('div')
   const shadow = el.attachShadow({ mode: 'closed' })
-  shadow.innerHTML = `<div class="tile-manager"></div>`
+  shadow.innerHTML = `<div class="tile-manager-wrapper">
+    <div class="tile-manager"></div>
+  </div>`
   const sheet = new CSSStyleSheet()
   shadow.adoptedStyleSheets = [sheet]
+  const wrapper = shadow.querySelector('.tile-manager-wrapper')
   const container = shadow.querySelector('.tile-manager')
 
   const subs = await sdb.watch(onbatch)
@@ -11435,7 +11674,6 @@ async function tile_manager (opts, invite) {
   const resize_observer = new ResizeObserver(on_resize_observed)
   resize_observer.observe(el)
 
-  // Click-based focus: detect clicks on tile slots to set focus
   container.addEventListener('pointerdown', function (e) {
     const slot = e.target.closest ? e.target.closest('.tile-slot') : null
     if (!slot) return
@@ -11445,9 +11683,9 @@ async function tile_manager (opts, invite) {
     }
   }, true)
 
-  function on_resize_observed (entries) {
+  function on_resize_observed(entries) {
     for (const entry of entries) {
-      handle_resize(entry.contentRect.width)
+      handle_resize(entry.contentRect.width, entry.contentRect.height)
     }
   }
 
@@ -11455,107 +11693,156 @@ async function tile_manager (opts, invite) {
 
   return el
 
-  // ---------------------------
-  // RESPONSIVE COLLAPSE
-  // ---------------------------
-
-  function handle_resize (width) {
-    if (get_tiles().length < 2) return
-
-    const should_collapse = width < COLLAPSE_THRESHOLD
-
-    if (should_collapse && !layout.collapsed) {
-      collapse_split()
-    } else if (!should_collapse && layout.collapsed) {
-      expand_split()
+  function get_tree_depth(node) {
+    if (!node) return 0
+    if (node.type === 'leaf') return 0
+    let max_child_depth = 0
+    for (const child of node.children) {
+      const d = get_tree_depth(child)
+      if (d > max_child_depth) max_child_depth = d
     }
+    return 1 + max_child_depth
   }
 
-  function collapse_split () {
-    console.error('tile_manager: collapsing split into tab group')
-    layout.collapsed = true
+  function get_max_collapse_level() {
+    return get_tree_depth(layout.root)
+  }
 
-    // Notify tile_0 to show collapsed tiles as a tab group
-    const root_tile_send = _.tile_0
-    if (root_tile_send) {
-      const collapsed_tiles = collect_collapsed_tiles()
-      root_tile_send('show_collapsed_tab_group', {}, { tiles: collapsed_tiles })
+  function pick_representative_child(node) {
+    return node.children.find(has_tile_0) || node.children[0]
+  }
+
+  function has_tile_0(node) {
+    if (!node) return false
+    if (node.type === 'leaf') return node.tile_id === 0
+    return node.children.some(child => has_tile_0(child))
+  }
+
+  function resolve_representative_leaf(node) {
+    if (node.type === 'leaf') return node.tile_id
+    return resolve_representative_leaf(pick_representative_child(node))
+  }
+
+  function measure_min_size(node, depth, prune_depth) {
+    if (!node) return { width: 0, height: 0 }
+    if (node.type === 'leaf') return { width: MIN_TILE_WIDTH, height: MIN_TILE_HEIGHT }
+    if (depth >= prune_depth) return measure_min_size(pick_representative_child(node), depth + 1, prune_depth)
+
+    const sizes = node.children.map(measure_child)
+    const widths = sizes.map(size => size.width)
+    const heights = sizes.map(size => size.height)
+    if (node.direction === 'horizontal') return { width: sum(widths), height: Math.max(...heights) }
+    return { width: Math.max(...widths), height: sum(heights) }
+
+    function measure_child(child) { return measure_min_size(child, depth + 1, prune_depth) }
+  }
+
+  function sum(values) { return values.reduce(add_value, 0) }
+
+  function add_value(total, value) { return total + value }
+
+  function pick_collapse_level(width, height) {
+    const max_level = get_max_collapse_level()
+    for (let level = 0; level < max_level; level++) {
+      const size = measure_min_size(layout.root, 0, max_level - level)
+      if (size.width <= width && size.height <= height) return level
     }
-
-    render_layout_tree().catch(err => console.error('tile_manager: collapse render failed', err))
+    return max_level
   }
 
-  function expand_split () {
-    console.error('tile_manager: expanding tab group back to split')
-    layout.collapsed = false
-
-    // Notify tile_0 to remove the collapsed tab group
-    const root_tile_send = _.tile_0
-    if (root_tile_send) {
-      root_tile_send('hide_collapsed_tab_group', {}, {})
+  function pick_level_showing_tile(tile_id) {
+    const max_level = get_max_collapse_level()
+    for (let level = max_level; level > 0; level--) {
+      if (collect_leaf_ids(layout.root, max_level - level).includes(tile_id)) return level
     }
-
-    render_layout_tree().catch(err => console.error('tile_manager: expand render failed', err))
+    return 0
   }
 
-  // ---------------------------
-  // TILE MANAGEMENT
-  // ---------------------------
-
-  function create_leaf_node (tile_id) {
-    return { type: 'leaf', tile_id, el: null }
+  function handle_resize(width, height) {
+    if (!width || !height) return
+    if (width === last_width && height === last_height) return
+    last_width = width
+    last_height = height
+    layout.manual_level = null
+    refresh_layout().catch(on_layout_error)
   }
 
-  function create_split_node (direction, first_node, second_node) {
-    const is_horizontal = direction === 'left' || direction === 'right'
-    return {
-      type: 'split',
-      direction: is_horizontal ? 'horizontal' : 'vertical',
-      split_direction: direction,
-      children: [first_node, second_node],
-      el: null
-    }
+  function set_collapse_level(level) {
+    const max_level = get_max_collapse_level()
+    layout.manual_level = Math.max(0, Math.min(level, max_level))
+    console.error('tile_manager: set_collapse_level', layout.manual_level, '(max:', max_level, ')')
+    refresh_layout().catch(on_layout_error)
   }
 
-  function get_tiles () {
+  function refresh_layout() {
+    const responsive_level = last_width ? pick_collapse_level(last_width, last_height) : layout.collapse_level
+    layout.collapse_level = layout.manual_level === null ? responsive_level : layout.manual_level
+    return render_layout_tree()
+  }
+
+  function on_layout_error(err) { console.error('tile_manager: layout render failed', err) }
+
+  function get_tiles() {
     return collect_leaf_ids().map(tile_id => tile_registry[tile_id]).filter(Boolean)
   }
 
-  function collect_leaf_ids (node = layout.root, tile_ids = []) {
+  function collect_leaf_ids(node = layout.root, prune_depth = Infinity, depth = 0, tile_ids = []) {
     if (!node) return tile_ids
     if (node.type === 'leaf') {
       tile_ids.push(node.tile_id)
       return tile_ids
     }
-    node.children.forEach(child => collect_leaf_ids(child, tile_ids))
+    if (depth >= prune_depth) {
+      return collect_leaf_ids(pick_representative_child(node), prune_depth, depth + 1, tile_ids)
+    }
+    node.children.forEach(child => collect_leaf_ids(child, prune_depth, depth + 1, tile_ids))
     return tile_ids
   }
 
-  function collect_collapsed_tiles (node = layout.root, direction = 'right', tiles = []) {
-    if (!node) return tiles
-    if (node.type === 'leaf') {
-      if (node.tile_id !== 0) {
-        tiles.push({
-          tile_id: node.tile_id,
-          direction,
-          tabs: tile_tabs[node.tile_id] || []
-        })
-      }
-      return tiles
+  function group_hidden_groups_by_anchor(node, depth, prune_depth, groups_by_tile = new Map()) {
+    if (!node || node.type === 'leaf') return groups_by_tile
+    if (depth < prune_depth) {
+      node.children.forEach(child => group_hidden_groups_by_anchor(child, depth + 1, prune_depth, groups_by_tile))
+      return groups_by_tile
     }
 
-    const child_directions = node.direction === 'horizontal'
-      ? ['left', 'right']
-      : ['up', 'down']
-
-    node.children.forEach(function (child, index) {
-      collect_collapsed_tiles(child, child_directions[index], tiles)
-    })
-
-    return tiles
+    const kept_child = pick_representative_child(node)
+    const hidden_children = node.children.filter(child => child !== kept_child)
+    if (hidden_children.length) {
+      const anchor_tile_id = resolve_representative_leaf(kept_child)
+      const group = {
+        type: 'collapsed_group',
+        split_id: node.split_id,
+        direction: node.direction,
+        depth: depth,
+        children: hidden_children.map(describe_subtree)
+      }
+      const groups = groups_by_tile.get(anchor_tile_id) || []
+      groups.push(group)
+      groups_by_tile.set(anchor_tile_id, groups)
+    }
+    return group_hidden_groups_by_anchor(kept_child, depth + 1, prune_depth, groups_by_tile)
   }
 
-  function find_leaf_node (tile_id, node = layout.root, parent = null, index = -1) {
+  function describe_subtree(node) {
+    if (!node) return null
+    if (node.type === 'leaf') {
+      return {
+        type: 'leaf',
+        tile_id: node.tile_id,
+        tabs: tile_tabs[node.tile_id] || [],
+        children: []
+      }
+    }
+    return {
+      type: 'split_group',
+      split_id: node.split_id,
+      direction: node.direction,
+      children: node.children.map(describe_subtree).filter(Boolean)
+    }
+  }
+
+  function find_leaf_node(tile_id, node = layout.root, parent = null, index = -1) {
     if (!node) return null
     if (node.type === 'leaf') {
       return node.tile_id === tile_id ? { node, parent, index } : null
@@ -11567,7 +11854,7 @@ async function tile_manager (opts, invite) {
     return null
   }
 
-  function replace_leaf_node (tile_id, next_node) {
+  function replace_leaf_node(tile_id, next_node) {
     const match = find_leaf_node(tile_id)
     if (!match) return false
     if (!match.parent) {
@@ -11578,7 +11865,7 @@ async function tile_manager (opts, invite) {
     return true
   }
 
-  async function ensure_tile (tile_id) {
+  async function ensure_tile(tile_id) {
     if (tile_registry[tile_id]) return tile_id
 
     const sub_entry = subs[tile_id] || { sid: opts.sid }
@@ -11608,35 +11895,70 @@ async function tile_manager (opts, invite) {
     return tile_id
   }
 
-  async function render_layout_tree () {
-    container.classList.toggle('collapsed', layout.collapsed)
+  async function render_layout_tree() {
+    const max_level = get_max_collapse_level()
+    const collapse_level = Math.max(0, Math.min(layout.collapse_level, max_level))
+    const prune_depth = max_level - collapse_level
 
-    const rendered_tree = layout.collapsed
-      ? await render_leaf_node(0)
-      : await render_node(layout.root)
+    layout.collapse_level = collapse_level
+    wrapper.setAttribute('data-collapse-level', collapse_level)
+    wrapper.setAttribute('data-max-level', max_level)
 
+    const rendered_tree = await render_node(layout.root, 0, prune_depth)
     sync_dom_children(container, rendered_tree ? [rendered_tree] : [])
-    set_focused_tile(layout.focused_tile)
+
+    sync_collapsed_tab_strip(collapse_level, max_level, prune_depth)
+    set_focused_tile(pick_visible_focus(prune_depth))
   }
 
-  async function render_node (node) {
+  async function render_node(node, depth, prune_depth) {
     if (!node) return null
     if (node.type === 'leaf') return render_leaf_node(node.tile_id)
+    if (depth >= prune_depth) return render_node(pick_representative_child(node), depth + 1, prune_depth)
 
     if (!node.el) node.el = document.createElement('div')
     node.el.className = `tile-split ${node.direction}`
 
     const child_elements = []
     for (const child of node.children) {
-      const child_el = await render_node(child)
+      const child_el = await render_node(child, depth + 1, prune_depth)
       if (child_el) child_elements.push(child_el)
     }
     sync_dom_children(node.el, child_elements)
     return node.el
   }
 
-  async function render_leaf_node (tile_id) {
-    const node = find_leaf_node(tile_id)?.node
+  function sync_collapsed_tab_strip(collapse_level, max_level, prune_depth) {
+    const groups_by_tile = collapse_level > 0 ? group_hidden_groups_by_anchor(layout.root, 0, prune_depth) : new Map()
+
+    for (const tile_id of collect_leaf_ids(layout.root, prune_depth)) {
+      const send = _[`tile_${tile_id}`]
+      if (!send) continue
+
+      const collapsed_groups = groups_by_tile.get(tile_id)
+      if (!collapsed_groups) {
+        send('hide_collapsed_tab_group', {}, {})
+        continue
+      }
+
+      send('show_collapsed_tab_group', {}, {
+        nested: true,
+        collapse_level: collapse_level,
+        max_level: max_level,
+        collapsed_groups: collapsed_groups
+      })
+    }
+  }
+
+  function pick_visible_focus(prune_depth) {
+    const visible_ids = collect_leaf_ids(layout.root, prune_depth)
+    if (visible_ids.includes(layout.focused_tile)) return layout.focused_tile
+    return visible_ids.length ? visible_ids[0] : layout.focused_tile
+  }
+
+  async function render_leaf_node(tile_id) {
+    const match = find_leaf_node(tile_id)
+    const node = match?.node
     if (!node) return null
     await ensure_tile(tile_id)
     const tile_info = tile_registry[tile_id]
@@ -11655,7 +11977,7 @@ async function tile_manager (opts, invite) {
     return node.el
   }
 
-  function sync_dom_children (parent, desired_children) {
+  function sync_dom_children(parent, desired_children) {
     let current_index = 0
 
     for (const child of desired_children) {
@@ -11671,25 +11993,31 @@ async function tile_manager (opts, invite) {
     }
   }
 
-  function io_tile (tile_id) {
-    return function tile_protocol (msg) {
+  function io_tile(tile_id) {
+    return function tile_protocol(msg) {
       const { type, data } = msg
       console.error(`tile_manager: message from tile_${tile_id}`, type, data)
 
-      if (tile_id === 0 && type === 'tab_group_tile_clicked') {
-        console.error('tile_manager: tab group tile clicked, expanding split')
-        expand_split()
+      if (type === 'tab_group_tile_clicked') {
+        const target_tile = data && typeof data.tile_id === 'number' ? data.tile_id : null
+        console.error('tile_manager: folded tab clicked, revealing tile', target_tile)
+        if (target_tile !== null) layout.focused_tile = target_tile
+        set_collapse_level(target_tile === null ? 0 : pick_level_showing_tile(target_tile))
         return
       }
 
-      // Track focus: when any tile sends ui_focus, update focus state
+      if (tile_id === 0 && type === 'request_collapse_level') {
+        if (data && typeof data.level === 'number') {
+          set_collapse_level(data.level)
+        }
+        return
+      }
+
       if (type === 'ui_focus') {
         set_focused_tile(tile_id)
       }
 
-      // Track tabs in each tile
       if (type === 'tab_name_clicked' && tile_id !== 0) {
-        // A tab was activated - ensure it's in our list
         if (data && data.id && tile_tabs[tile_id]) {
           const exists = tile_tabs[tile_id].find(t => t.id === data.id)
           if (!exists) {
@@ -11719,7 +12047,7 @@ async function tile_manager (opts, invite) {
           if (data.result) {
             try {
               const results = JSON.parse(data.result)
-              direction = results[0] // First step's data is the direction
+              direction = results[0]
               console.error('tile_manager: direction from result:', direction)
             } catch (e) {
               console.error('tile_manager: failed to parse result', e)
@@ -11748,7 +12076,7 @@ async function tile_manager (opts, invite) {
     }
   }
 
-  async function handle_split (source_tile_id, direction) {
+  async function handle_split(source_tile_id, direction) {
     const source_match = find_leaf_node(source_tile_id)
     if (!source_match) {
       console.error('tile_manager: source tile not found for split', source_tile_id)
@@ -11756,30 +12084,39 @@ async function tile_manager (opts, invite) {
     }
 
     const new_tile_id = tile_counter++
-    const new_leaf = create_leaf_node(new_tile_id)
+    const new_leaf = { type: 'leaf', tile_id: new_tile_id, el: null }
     const source_leaf = source_match.node
-    const replacement = direction === 'left' || direction === 'up'
-      ? create_split_node(direction, new_leaf, source_leaf)
-      : create_split_node(direction, source_leaf, new_leaf)
+    const is_horizontal = direction === 'left' || direction === 'right'
+    const split_node = {
+      type: 'split',
+      split_id: split_counter++,
+      direction: is_horizontal ? 'horizontal' : 'vertical',
+      split_direction: direction,
+      children: direction === 'left' || direction === 'up'
+        ? [new_leaf, source_leaf]
+        : [source_leaf, new_leaf],
+      el: null
+    }
 
-    replace_leaf_node(source_tile_id, replacement)
-    await render_layout_tree()
+    replace_leaf_node(source_tile_id, split_node)
 
+    await ensure_tile(new_tile_id)
     send_cached_actions_to_tile(new_tile_id)
 
     const new_tile_send = _[`tile_${new_tile_id}`]
     if (new_tile_send) {
       const tab_data = { name: 'New Tab', program: 'text_editor' }
       new_tile_send('create_default_tab', {}, tab_data)
-      // Track this tab
       if (!tile_tabs[new_tile_id]) tile_tabs[new_tile_id] = []
       tile_tabs[new_tile_id].push({ id: `tab_initial_${new_tile_id}`, name: tab_data.name, program: tab_data.program })
     }
 
+    await refresh_layout()
+
     console.error('tile_manager: split complete', direction, get_tiles().length, 'tiles')
   }
 
-  function handle_merge (tile_id_to_remove) {
+  function handle_merge(tile_id_to_remove) {
     console.error('tile_manager: handle_merge', tile_id_to_remove)
 
     const match = find_leaf_node(tile_id_to_remove)
@@ -11794,27 +12131,26 @@ async function tile_manager (opts, invite) {
     if (match.parent === layout.root) {
       layout.root = sibling_node
     } else {
-      const replace_parent = replace_split_parent(layout.root, match.parent, sibling_node)
-      if (!replace_parent) {
+      const did_replace = replace_split_parent(layout.root, match.parent, sibling_node)
+      if (!did_replace) {
         console.error('tile_manager: failed to replace merge parent for tile', tile_id_to_remove)
         return
       }
     }
 
     const tile_info = tile_registry[tile_id_to_remove]
-    if (tile_info?.element && tile_info.element.parentNode) {
+    if (tile_info?.element?.parentNode) {
       tile_info.element.parentNode.remove()
     }
     delete tile_registry[tile_id_to_remove]
     delete tile_tabs[tile_id_to_remove]
 
-    if (layout.collapsed) expand_split()
-    else render_layout_tree().catch(err => console.error('tile_manager: merge render failed', err))
+    refresh_layout().catch(on_layout_error)
 
     console.error('tile_manager: merge complete, tiles remaining:', get_tiles().length)
   }
 
-  function replace_split_parent (node, target_parent, replacement_node) {
+  function replace_split_parent(node, target_parent, replacement_node) {
     if (!node || node.type === 'leaf') return false
     for (let index = 0; index < node.children.length; index++) {
       if (node.children[index] === target_parent) {
@@ -11826,11 +12162,10 @@ async function tile_manager (opts, invite) {
     return false
   }
 
-  function set_focused_tile (tile_id) {
+  function set_focused_tile(tile_id) {
     console.error('tile_manager: set_focused_tile', tile_id)
     layout.focused_tile = tile_id
 
-    // Update tile slot CSS classes for focus highlighting
     for (const tile of get_tiles()) {
       const slot = tile.slot
       if (slot) {
@@ -11838,7 +12173,6 @@ async function tile_manager (opts, invite) {
       }
     }
 
-    // Notify each tile about the focus state so tabs can update
     for (const tile of get_tiles()) {
       const send = _[`tile_${tile.id}`]
       if (send) {
@@ -11847,27 +12181,7 @@ async function tile_manager (opts, invite) {
     }
   }
 
-  function focus_tile (tile_id) {
-    console.error('tile_manager: focus_tile', tile_id)
-
-    if (layout.collapsed) {
-      expand_split()
-    }
-
-    for (const tile of get_tiles()) {
-      const slot = tile.slot
-      if (slot) {
-        slot.classList.toggle('focused', tile.id === tile_id)
-      }
-    }
-
-    const tile_info = tile_registry[tile_id]
-    if (tile_info?.element) {
-      tile_info.element.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
-    }
-  }
-
-  function send_cached_actions_to_tile (tile_id) {
+  function send_cached_actions_to_tile(tile_id) {
     const send = _[`tile_${tile_id}`]
     if (!send) {
       console.error('tile_manager: cannot send cached actions, tile_' + tile_id + ' not found')
@@ -11884,17 +12198,13 @@ async function tile_manager (opts, invite) {
     }
   }
 
-  // ---------------------------
-  // MESSAGE HANDLERS
-  // ---------------------------
-
-  function io_up () {
+  function io_up() {
     const cacheable = {
       update_actions_for_app: true,
       update_quick_actions_for_app: true,
       update_steps_wizard_for_app: true
     }
-    return function onmessage (msg) {
+    return function onmessage(msg) {
       const { type, data } = msg
       console.error('tile_manager: message from root', type, 'tiles:', get_tiles().length)
       if (cacheable[type]) {
@@ -11909,27 +12219,23 @@ async function tile_manager (opts, invite) {
     }
   }
 
-  // ---------------------------
-  // BATCH HANDLER
-  // ---------------------------
-
-  async function onbatch (batch) {
+  async function onbatch(batch) {
     for (const { type, paths } of batch) {
       const data = await Promise.all(paths.map(load_path_raw))
       const func = on[type] || fail
       func({ data, type })
     }
 
-    function load_path_raw (path) { return drive.get(path).then(read_drive_file_raw) }
-    function read_drive_file_raw (file) { return file.raw }
+    function load_path_raw(path) { return drive.get(path).then(read_drive_file_raw) }
+    function read_drive_file_raw(file) { return file.raw }
   }
 
-  function inject ({ data }) { sheet.replaceSync(data[0]) }
+  function inject({ data }) { sheet.replaceSync(data[0]) }
 
-  function fail ({ data, type }) { console.warn('tile_manager: invalid message', { cause: { data, type } }) }
+  function fail({ data, type }) { console.warn('tile_manager: invalid message', { cause: { data, type } }) }
 }
 
-function fallback_module () {
+function fallback_module() {
   return {
     api: fallback_instance,
     _: {
@@ -11945,7 +12251,7 @@ function fallback_module () {
     }
   }
 
-  function fallback_instance () {
+  function fallback_instance() {
     return {
       _: {
         theme_widget: {
@@ -11980,6 +12286,9 @@ function fallback_module () {
           1: '',
           2: '',
           3: '',
+          4: '',
+          5: '',
+          6: '',
           mapping: {
             style: 'style',
             icons: 'icons',
