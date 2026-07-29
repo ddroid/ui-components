@@ -253,4 +253,101 @@ describe('DOCS sys API', () => {
 
     expect(sent).toEqual([{ type: 'clicked', refs: {}, data: null }])
   })
+
+  it('runs registered action closures from function handlers', async () => {
+    const docs = create_docs()
+    const interaction_state = { count: 0 }
+    const run = vi.fn(() => 'completed')
+    const action = { ...create_action(), run }
+
+    function on_click (event, $) {
+      $.state.count += 1
+      if ($.state.count === 2) $('open_file')
+      return $.state.count
+    }
+    on_click.info = 'Count clicks.'
+    on_click.opts = { state: interaction_state }
+
+    docs.register_actions([action])
+    const handler = docs.wrap_isolated(on_click, 'Legacy docs')
+
+    expect(docs.get_toc().handlers[0].doc).toBe('Count clicks.')
+    expect(await handler({})).toBe(1)
+    expect(await handler({})).toBe('completed')
+    expect(run).toHaveBeenCalledOnce()
+    expect(interaction_state.count).toBe(2)
+    expect(docs.admin.get_actions('sid_1')[0].run).toBeUndefined()
+  })
+
+  it('shares disposable docs state across isolated handlers', async () => {
+    const docs = create_docs()
+    const displays = []
+    const interaction_state = { count: 0 }
+    const run = vi.fn()
+
+    function add (event, $) {
+      $.state.count += event.value
+      return $.state.count
+    }
+    function submit (event, $) {
+      if ($.state.count === 2) $('Open File')
+    }
+    add.info = 'Add input.'
+    submit.info = 'Submit input.'
+    add.opts = { state: interaction_state }
+    submit.opts = { state: interaction_state }
+
+    docs.register_actions([{ ...create_action(), run }])
+    docs.admin.set_doc_display_handler(display => displays.push(display))
+    docs.admin.set_docs_mode(true)
+
+    const add_handler = docs.wrap_isolated(add)
+    const submit_handler = docs.wrap_isolated(submit)
+    expect(await add_handler({ value: 2 })).toBe(2)
+    await submit_handler({})
+
+    expect(interaction_state.count).toBe(0)
+    expect(run).not.toHaveBeenCalled()
+    expect(displays.map(display => display.content)).toEqual(['Add input.', 'Open the selected file.'])
+
+    docs.admin.set_docs_mode(false)
+    await add_handler({ value: 1 })
+    docs.admin.set_docs_mode(true)
+    await submit_handler({})
+
+    expect(interaction_state.count).toBe(1)
+    expect(displays.at(-1).content).toBe('Submit input.')
+  })
+
+  it('does not give function handlers access to their closure', async () => {
+    const docs = create_docs()
+    const closure_value = 'private'
+
+    function on_click (event) { event.value = closure_value }
+
+    const handler = docs.wrap_isolated(on_click)
+    await expect(handler({})).rejects.toThrow(ReferenceError)
+  })
+
+  it('propagates documentation display failures', async () => {
+    const docs = create_docs()
+    const failure = new Error('display failed')
+
+    function on_click () {}
+    on_click.info = 'Click docs.'
+
+    docs.admin.set_doc_display_handler(() => Promise.reject(failure))
+    docs.admin.set_docs_mode(true)
+
+    await expect(docs.wrap_isolated(on_click)({})).rejects.toThrow(failure)
+  })
+
+  it('validates action info and rejects ambiguous aliases', () => {
+    const docs = create_docs()
+    const invalid_action = { ...create_action(), info: '' }
+    const alias_collision = { ...create_action(), name: 'open_file' }
+
+    expect(() => docs.register_actions([invalid_action])).toThrow("Invalid 'info'")
+    expect(() => docs.register_actions([create_action(), alias_collision])).toThrow('Duplicate action key "open_file"')
+  })
 })
