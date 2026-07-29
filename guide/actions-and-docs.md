@@ -15,91 +15,37 @@ async function component (opts, invite) {
 }
 ```
 
-### Hooking DOM elements
-
-Use `docs.hook(element, doc_content)` to wrap all event handler properties already assigned on the element, such as `onclick`, `ontouchstart`, or `onmousedown`. In docs mode, those events show the docs instead of running the handler.
-
-```js
-const button = document.createElement('button')
-button.onclick = onbutton_click
-button.onmousedown = onbutton_press
-onbutton_click.docs = '# Click\nRuns the click action.'
-onbutton_press.info = '# Press\nStarts press behavior.'
-
-docs.hook(button)
-```
-
-`docs.hook` applies the same documentation to every handler when `doc_content` is passed. If `doc_content` is omitted, each handler can provide its own `handler.docs` or `handler.info`. The wrapped handler metadata includes `event_type`.
-e.g.
-```js
-button.onclick = docs.wrap(onbutton_click, '# Close Button\nCloses the current view.')
-```
-
-### Wrapping individual handlers
-
-`docs.wrap(handler, doc_content)` is deprecated; it still works (and warns once per module) but new handlers should use `docs.wrap_isolated()`. It is kept only as a migration stepping stone. For handlers that still need closure functions or mutate component-local DOM/state, prefer the element-attached `__fn` shim under `wrap_isolated` (see below) over `docs.wrap`.
-
-```js
-button.onmousedown = docs.wrap(onbutton_press, '# Press Button\nStarts press-and-hold behavior.')
-```
-
-If the docs belong to the handler itself, set `handler.docs` or `handler.info` and omit `doc_content`:
-
-```js
-function onbutton_click () {}
-onbutton_click.docs = '# Close Button\nCloses the current view.'
-button.onclick = docs.wrap(onbutton_click)
-```
-
-The wrapped handler receives `(event, sys)`. `sys` exposes docs helpers such as `sys.is_docs_mode()`, `sys.get_doc()`, `sys.get_meta()`, and `sys.show_doc()`.
-
-When an isolated handler needs real normal-mode side effects, the component can optionally call `docs.set_sys({ _, sdb, drive })`. Without configured resources, `sys` suppresses unavailable sends/writes and warns instead of throwing.
-
-Isolated handlers can use:
-
-- `sys._.up(type, refs, data)` or `sys.send('up', type, refs, data)` to send through `net_helper` in normal mode
-- `sys.drive.get(path)` to read drive files in normal mode; docs mode returns `{ raw: null, path }`
-- `sys.drive.put(path, data)` to write in normal mode; docs mode returns `Promise<false>`
-- `sys.sdb.watch(handler)` in normal mode; docs mode returns `Promise<[]>`
-- `sys.state` - per-handler object for intermediate gesture state; cleared for all handlers when docs mode deactivates
-- `sys.show_action_info(action)` before running an action; docs mode displays `action.info` and returns `true`
-- `sys.trigger_action(action_or_name, options)` to display action `info` in docs mode or perform the configured normal-mode send/run
-
 ### Wrapping isolated handlers
 
-Use `docs.wrap_isolated(handler_string, doc_content, options)` when the handler must be created from a function string and must not access local closure scope. `options.run_in_docs_mode` (default `true`) picks the docs-mode behavior:
-
-- `true` (default) — the handler runs in docs mode with a dummy/safe `sys` (sends/writes suppressed). Add a docs-mode guard (`if (sys.is_docs_mode()) return sys.show_doc()`) before any real side effect; safe gesture progression (e.g. a counter display) can happen before the guard. Use `sys.trigger_action()` for action triggers so `action.info` shows in docs mode.
-- `false` — docs mode blocks the event and shows `doc_content` instead. Reserve for the `__fn` shim or handlers that cannot be guarded inline.
-
-If compilation fails, `DOCS` logs an error and returns a no-op handler.
+Pass a normal function to `docs.wrap_isolated()`. DOCS compiles it without closure access and supplies only the original `event`, callable `$`, and `$.state`.
 
 ```js
-button.onclick = docs.wrap_isolated(
-  'function (event, sys) { if (sys.is_docs_mode()) return sys.show_doc(); sys._.up("ui_focus", {}, { type: "button", sid: sys.get_meta().sid }) }',
-  '# Inspect Button\nLogs component metadata.'
-)
+const click_state = { count: 0 }
+
+function on_click (event, $) {
+  $.state.count += 1
+  event.currentTarget.textContent = $.state.count
+  if ($.state.count === 10) $('Click Rate Result')
+}
+
+on_click.info = 'Record one click in the sequence.'
+on_click.opts = { state: click_state }
+button.onclick = docs.wrap_isolated(on_click)
 ```
 
-```js
-button.onclick = docs.wrap_isolated(
-  'function (event, sys) { sys.trigger_action("Open File", { channel: "up", type: "selected_action" }) }',
-  '# Open File\nStarts the file-open action.'
-)
-```
+The handler may progress an interaction across several events before requesting one action. It does not receive `sdb`, `drive`, `_`, or component closures. Real effects belong in the registered action's `run` function.
 
-Isolated handlers cannot reach closure variables. Pass per-event data through the event target (`el.__action = action_data`, read via `event.currentTarget.__action`) and component functions through element properties. Call `docs.set_sys({ _, sdb, drive })` once per component so isolated handlers have real normal-mode side effects.
+Normal mode uses the declared state and executes `run`. Docs mode blocks the browser event, uses fresh disposable state, and displays handler or action information without executing `run`. Handlers sharing the same state object participate in the same interaction sequence.
 
-For a closure handler not yet restructured, use the `__fn` shim: attach the closure to the element and delegate from a thin string with `run_in_docs_mode: false`:
+Use `handler.info` for documentation. `handler.docs` is supported only for compatibility. State belongs in `handler.opts.state`, never on a DOM element.
 
-```js
-button.__fn = local_on_click
-button.onclick = docs.wrap_isolated(
-  'function (event, sys) { event.currentTarget.__fn(event, sys) }',
-  '# Button\nDocs for the shimmed handler.',
-  { run_in_docs_mode: false }
-)
-```
+### Hooking DOM elements
+
+The current `docs.hook(element, doc_content)` wraps handler properties already assigned on one element. It can use shared `doc_content` or each handler's `info`/legacy `docs`. Recursive and shadow-DOM traversal are not implemented.
+
+### Legacy compatibility
+
+`docs.wrap()`, string input to `wrap_isolated`, `run_in_docs_mode`, `set_sys`, and the old `sys` resource facade remain temporarily for unmigrated components. Do not use them in new code.
 
 ### Browsing docs without gestures
 
@@ -118,12 +64,12 @@ The registry dedupes by `(event_type, doc)`, so re-rendering a dynamic list does
 
 The details window leverages a global docs mode state:
 
-1. Docs mode is activated globally (e.g. by toggling the `docs_toggle` action).
-2. For a handler wrapped with `run_in_docs_mode: false` (or the `__fn` shim, or the deprecated `docs.wrap()`), `DOCS` prevents the default action, stops propagation, and triggers the doc display handler.
-3. `docs.wrap_isolated()` handlers with `run_in_docs_mode: true` (the default) still run in docs mode with a dummy/safe `sys`; sends and writes are suppressed, a docs-mode guard shows the handler doc before real side effects, and intermediate state lives in `sys.state` and is discarded when docs mode deactivates.
-4. When the user triggers a registered action, the action `info` text is shown instead of executing the action.
-5. The display handler receives `{ content, sid }` and renders the markdown in the details window.
-6. `docs.get_toc()` lets the UI browse all actions and handler docs without triggering any gesture.
+1. Docs mode is activated globally.
+2. DOCS prevents the browser default and propagation for a function-based isolated handler.
+3. The handler runs with disposable interaction state.
+4. If it requests an action, DOCS displays `action.info` instead of calling `run`; otherwise it displays the handler documentation.
+5. The display handler receives `{ content, sid }` and renders the content.
+6. `docs.get_toc()` lets the UI browse all actions and handler docs without triggering a gesture.
 
 ### Admin Setup (Root Module)
 
@@ -173,7 +119,7 @@ Each action must follow this shape:
 }
 ```
 
-`info` is required. Keep it short and useful because docs mode displays this text in the details window when the action would normally run.
+`info` is required. Keep it short and useful because docs mode displays this text when the action would normally run. A component-owned action may also include a `run` closure; DOCS stores it privately and omits it from public action metadata.
 
 ### Registering actions
 
@@ -187,14 +133,28 @@ if (actions_file.raw) {
 }
 ```
 
-When a component is about to run a registered action, call `docs.show_action_info(action)` first. It returns `true` in docs mode after displaying `action.info`, so the component should stop there.
+For a component-owned action, register its real closure with the metadata:
 
 ```js
-function on_action_click () {
-  if (docs.show_action_info(action)) return
-  run_action(action)
+const save_action = {
+  name: 'Save',
+  info: 'Save the current document.',
+  icon: 'save',
+  status: {},
+  steps: [],
+  run: save
 }
+
+docs.register_actions([save_action])
 ```
+
+An isolated handler requests it by name or generated alias:
+
+```js
+function on_save (event, $) { $('save') }
+```
+
+DOCS alone decides whether to show `info` or call `run`. Components must not call `show_action_info()` to gate execution.
 
 ### Retrieving actions (ActionBar/Admin)
 
