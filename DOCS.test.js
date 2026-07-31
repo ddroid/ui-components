@@ -100,6 +100,31 @@ describe('DOCS isolated handlers', () => {
     expect(docs.get_toc().handlers).toEqual([])
   })
 
+  it('keeps hidden actions dispatchable but out of public action lists', async () => {
+    const docs = create_docs()
+    const run = vi.fn()
+    const hidden_action = {
+      ...create_action(),
+      name: 'Focus Wizard Hat',
+      status: { hidden: true },
+      run
+    }
+
+    function on_focus (event, $) { $('Focus Wizard Hat') }
+
+    docs.register_actions([create_action(), hidden_action])
+
+    expect(docs.admin.get_actions('sid_1').map(action => action.name)).toEqual(['Open File'])
+    expect(docs.get_toc().actions.map(action => action.name)).toEqual(['Open File'])
+    await docs.wrap_isolated(on_focus)({})
+    expect(run).toHaveBeenCalledOnce()
+
+    docs.register_actions([hidden_action])
+    expect(docs.admin.get_actions('sid_1')).toEqual([])
+    await docs.wrap_isolated(on_focus)({})
+    expect(run).toHaveBeenCalledTimes(2)
+  })
+
   it('runs registered action closures from function handlers', async () => {
     const docs = create_docs()
     const interaction_state = { count: 0 }

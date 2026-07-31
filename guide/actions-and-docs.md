@@ -115,6 +115,8 @@ Each action must follow this shape:
 
 `info` is required. Keep it short and useful because docs mode displays this text when the action would normally run. A component-owned action may also include a `run` closure; DOCS stores it privately and omits it from public action metadata.
 
+Use `status.hidden: true` for internal component operations that must remain dispatchable without appearing in action menus. Hidden actions are omitted from `get_actions()` and the ToC action list.
+
 ### Registering actions
 
 Load the actions array from the component drive and register:
