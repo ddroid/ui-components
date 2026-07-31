@@ -17,7 +17,7 @@ async function component (opts, invite) {
 
 ### Wrapping isolated handlers
 
-Pass a normal function to `docs.wrap_isolated()`. DOCS compiles it without closure access and supplies only the original `event`, callable `$`, and `$.state`.
+Pass a normal function to `docs.wrap_isolated()`. DOCS compiles it without closure access and supplies only the original `event`, callable `$`, and `$.state`. The original handler `this` is preserved, normally as the DOM element; do not store state or component resources on it.
 
 ```js
 const click_state = { count: 0 }
@@ -37,15 +37,9 @@ The handler may progress an interaction across several events before requesting 
 
 Normal mode uses the declared state and executes `run`. Docs mode blocks the browser event, uses fresh disposable state, and displays handler or action information without executing `run`. Handlers sharing the same state object participate in the same interaction sequence.
 
-Use `handler.info` for documentation. `handler.docs` is supported only for compatibility. State belongs in `handler.opts.state`, never on a DOM element.
+Use `handler.info` for documentation. State belongs in `handler.opts.state`, never on a DOM element.
 
-### Hooking DOM elements
-
-The current `docs.hook(element, doc_content)` wraps handler properties already assigned on one element. It can use shared `doc_content` or each handler's `info`/legacy `docs`. Recursive and shadow-DOM traversal are not implemented.
-
-### Legacy compatibility
-
-`docs.wrap()`, string input to `wrap_isolated`, `run_in_docs_mode`, `set_sys`, and the old `sys` resource facade remain temporarily for unmigrated components. Do not use them in new code.
+`wrap_isolated` accepts normal functions only. It is the only DOCS event-handler wrapper and does not expose `sdb`, `drive`, `_`, or other component resources.
 
 ### Browsing docs without gestures
 
@@ -53,10 +47,10 @@ The current `docs.hook(element, doc_content)` wraps handler properties already a
 
 ```js
 const { actions, handlers } = docs.get_toc()
-// handlers: [{ doc, event_type, component }, ...] recorded from wrap/wrap_isolated/hook
+// handlers: [{ doc, component }, ...] recorded from wrap_isolated
 ```
 
-The registry dedupes by `(event_type, doc)`, so re-rendering a dynamic list does not add duplicate entries. Call `docs.clear_handler_docs()` (admin: `docs.admin.clear_handler_docs(sid)`) to reset a component's handler docs on teardown or re-init.
+The registry dedupes handler documentation, so re-rendering a dynamic list does not add duplicate entries. Call `docs.clear_handler_docs()` (admin: `docs.admin.clear_handler_docs(sid)`) to reset a component's handler docs on teardown or re-init.
 
 ---
 
@@ -154,7 +148,7 @@ An isolated handler requests it by name or generated alias:
 function on_save (event, $) { $('save') }
 ```
 
-DOCS alone decides whether to show `info` or call `run`. Components must not call `show_action_info()` to gate execution.
+DOCS alone decides whether to show `info` or call `run`. Components do not perform their own docs-mode gate.
 
 ### Retrieving actions (ActionBar/Admin)
 
